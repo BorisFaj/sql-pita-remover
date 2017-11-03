@@ -4,14 +4,19 @@
 import logging
 import nltk
 import re
+import os
+import json
 
 
 class Parser:
-    def __init__(self, grammar):
+    def __init__(self, conf_path, conf_file):
         logging.basicConfig(level=logging.DEBUG, format='%(levelname)s %(name)s %(asctime)s %(message)s')
         self.logger = logging.getLogger('hive_parser')
-        self.__grammar = self._read_grammar_(grammar)
+        self._config = self.load_json(os.path.join(conf_path, conf_file))
+        self.__grammar = self._read_grammar_(os.path.join(conf_path, self._config['grammar_file']))
+        self.__mapping = self._load_mapping_files(os.path.join(conf_path, self._config['mapping_dir']))
         self.__subqueries = []
+        self.__reverse_tree = []
 
     @staticmethod
     def _read_grammar_(path):
@@ -73,6 +78,19 @@ class Parser:
         d[i].setdefault('tables', {'alias': {}, 'names': []})
         return d
 
+    def load_json(self, path):
+        if not os.path.exists(path):
+            raise FileNotFoundError('No se encuentra el fichero especificado: {}'.format(path))
+
+        js = open(path)
+        return json.load(js)
+
+    def _load_mapping_files(self, path):
+        if not os.path.isdir(path):
+            raise FileNotFoundError('No se encuentra la ruta especificada: {}'.format(path))
+
+        return {f: self.load_json(os.path.join(path, f)) for f in os.listdir(path)}
+
     def parse_query(self, query):
         """Parsea una query en texto plano para transformarla en una sentencia de la gramatica.
             1. Se ponen espacio a cada lado de los signos de puntuacion, parentesis, etc.
@@ -105,6 +123,12 @@ class Parser:
         i: int
             Indice de la subquery.
         """
+        # cuando se procesa la query raiz de todas, no habra subqueries
+        # tampoco cuando sea la segunda parte de un union
+        if not len(self.__subqueries):
+            self.logger.debug('No hay subqueries para asignar la numero {}'.format(i))
+            return
+
         _node = self.__subqueries.pop()
         _node.update({'subquery': i})
 
@@ -151,9 +175,11 @@ class Parser:
                     self.__subqueries.append(tables['alias'][_table_name])
                 elif tree.label() != 'TABLE_ALIAS':
                     tables['names'] += [''.join(node.leaves())]
+                    self.__reverse_tree.append((tree, i))
                 elif tree.label() == 'TABLE_ALIAS':
                     if tables['names']:  # si no es una subquery
                         tables['alias'].setdefault(node.leaves()[0], tables['names'][-1])
+                        self.__reverse_tree.append((tree, i))
 
         return skip_to
 
@@ -184,8 +210,7 @@ class Parser:
         return columns
 
     def get_nodes(self, parent, queries, i=0, root='SELECT_SENTENCE'):
-        queries.update(self.__init_query__(queries, i))
-        name_nodes = []
+        queries.update(self.__init_query__(queries, i + 1))
 
         for node in parent:
             next_node = None
@@ -193,19 +218,22 @@ class Parser:
                 if node.label() == root:
                     queries['max'] += 1
                     i = queries['max']
-                    if i > 1:
-                        self.__update_subqueries__(i)
-                        self.logger.debug('Actualizadas subqueries')
+                    self.__update_subqueries__(i)
                 elif node.label() == 'COLUMN_EXPRESSION':
-                    name_nodes.append(node)
+                    self.__reverse_tree.append((node, i))
+                    self.get_column_names(node, queries[i]['columns'])
+                elif parent.label() == 'FROM_EXPRESSION' and node.label() != 'TABLE_EXPRESSION':
+                    self.__reverse_tree.append((node, i))
                     self.get_column_names(node, queries[i]['columns'])
                 elif parent.label() == 'TABLE_EXPRESSION' and node.label() != 'TABLE_EXPRESSION':
-                    name_nodes.append(node)
+                    #self.__reverse_tree.append((node, i))
                     next_node = self.get_table_name(node, root, queries, i)
 
                 if not node.label() == 'COLUMN_EXPRESSION':
-                    _nodes, _queries = self.get_nodes(self.__skip_to_node__(next_node, node), queries, i)
-                    name_nodes += _nodes
-                    queries.update(_queries)
+                    self.get_nodes(self.__skip_to_node__(next_node, node), queries, i)
+                    #queries.update(_queries)
 
-        return name_nodes, queries
+        return queries
+
+    def get_reverse_tree(self):
+        return self.__reverse_tree
