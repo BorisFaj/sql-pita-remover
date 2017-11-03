@@ -8,18 +8,44 @@ import re
 
 class Parser:
     def __init__(self, grammar):
-        self.__grammar = self._read_grammar_(grammar)
         logging.basicConfig(level=logging.DEBUG, format='%(levelname)s %(name)s %(asctime)s %(message)s')
         self.logger = logging.getLogger('hive_parser')
+        self.__grammar = self._read_grammar_(grammar)
+        self.__subqueries = []
 
     @staticmethod
     def _read_grammar_(path):
+        """Lee las reglas de produccion de la gramatica contenidas en el fichero indicado.
+
+        Parameters
+        ----------
+        path: str
+            Ruta al fichero que contiene las reglas de produccion de la gramatica.
+
+        Returns
+        -------
+        nltk.grammar.CFG
+            Objeto nltk que contiene la gramatica libre de contexto leida.
+        """
         f = open(path, 'r')
         return nltk.CFG.fromstring(' '.join(f.readlines()))
 
-
     @staticmethod
     def __skip_to_node__(target, current):
+        """Devuelve el nodo target si este no es null, en otro caso devuelve el current.
+
+        Parameters
+        ----------
+        target: nltk.Tree
+            Nodo evaluado.
+        current: nltk.Tree
+            Nodo actual.
+
+        Returns
+        -------
+        nltk.Tree
+            Devuelve el nodo target si este no es null, en otro caso devuelve el current.
+        """
         if type(target) is nltk.Tree:
             return target
 
@@ -27,39 +53,125 @@ class Parser:
 
     @staticmethod
     def __init_query__(d, i):
+        """Inicializa una query con el formato especifico utilizado en la clase.
+
+        Parameters
+        ----------
+        d: dict
+            Diccionario que se va a inicializar.
+        i: int
+            Indice actual.
+
+        Returns
+        -------
+        dict
+            Diccionario inicializado.
+        """
+        d.setdefault('max', 0)
         d.setdefault(i, {})
         d[i].setdefault('columns', {'alias': {}, 'names': []})
         d[i].setdefault('tables', {'alias': {}, 'names': []})
         return d
 
     def parse_query(self, query):
+        """Parsea una query en texto plano para transformarla en una sentencia de la gramatica.
+            1. Se ponen espacio a cada lado de los signos de puntuacion, parentesis, etc.
+            2. Si quedan varios espacios seguidos, se simplifican a un espacio.
+            3. Se separan las palabras para convertirlas elementos de una lista.
+
+        Parameters
+        ----------
+        query: str
+            Query que se va a transformar.
+
+        Returns
+        -------
+        generator(nltk.tree.Tree)
+            Devuelve los arboles de sintaxis que representan la query parseada.
+        """
         sent = query.replace(',', ' , ').replace('.', ' . ').replace('(', ' ( ').replace(')', ' ) ')
         sent = [chunk for chunk in re.sub(' +', ' ', sent).split(' ') if chunk]
         parser = nltk.ChartParser(self.__grammar)
 
         return parser.parse(sent)
 
+    def __update_subqueries__(self, i):
+        """Cuando se lee un nodo que representa una subquery, este se almacena en una cola a la espera de saber
+        el indice de esa subquery. Cuando la siguiente subquery empieza a procesarse, coge el ultimo elemento de la
+        cola y le asigna su indice.
+
+        Parameters
+        ----------
+        i: int
+            Indice de la subquery.
+        """
+        _node = self.__subqueries.pop()
+        _node.update({'subquery': i})
+
     def get_table_name(self, tree, root, queries, i, skip_to=None):
+        """Extrae los nombres de las tablas involucradas en este nivel de la query asi como sus alias a partir de un
+        nodo TABLE_EXPRESSION. Las posibles subqueries no se procesan todavia, quedan a la espera de que la funcion
+        que llama a get_table_name itere sobre ellas.
+
+        Parameters
+        ----------
+        tree: nltk.Tree
+            Nodo raiz.
+        root: str
+            Nombre del nodo que contiene una subquery.
+        queries: dict
+            Diccionario con la informacion de las queries procesadas hasta ahora.
+        i: int
+            Indice actual.
+        skip_to: nltk.Tree
+            Toma el valor del ultimo nodo procesado para que la funcion que llama a get_table_name pueda saltar
+        directamente a ese nodo y no tenga que volver a procesarlo. Si el nodo contiene subqueries, se deuvelve
+        la raiz de la primera subquery.
+
+        Returns
+        -------
+        nltk.Tree
+            Toma el valor del ultimo nodo procesado para que la funcion que llama a get_table_name pueda saltar
+        directamente a ese nodo y no tenga que volver a procesarlo. Si el nodo contiene subqueries, se deuvelve
+        la raiz de la primera subquery.
+        """
         tables = queries[i]['tables']
         for node in tree:
             if type(node) is nltk.Tree:
                 if node.label() not in ['TABLE_NAMES', root]:
-                    _skip, _ = self.get_table_name(node, root, queries, i, skip_to)
+                    _skip = self.get_table_name(node, root, queries, i, skip_to)
                     skip_to = self.__skip_to_node__(skip_to, _skip)
                 elif node.label() == root:
+                    # Se evalua si es el primer nodo root encontrado
                     skip_to = self.__skip_to_node__(skip_to, tree)
-                    _subqueries_num = tables.get('__subqueries__', 0) + 1
-                    tables['__subqueries__'] = _subqueries_num
-                    tables['alias'].setdefault(tree[-1].leaves()[1], {'subquery': i + _subqueries_num})
+                    # Se extrae el alias (sin AS) y se actualiza el diccionario
+                    _table_name = tree[-1].leaves()[1]
+                    tables['alias'].setdefault(_table_name, {'subquery': 0})
+                    # Se mete a la cola de subqueries
+                    self.__subqueries.append(tables['alias'][_table_name])
                 elif tree.label() != 'TABLE_ALIAS':
                     tables['names'] += [''.join(node.leaves())]
                 elif tree.label() == 'TABLE_ALIAS':
                     if tables['names']:  # si no es una subquery
                         tables['alias'].setdefault(node.leaves()[0], tables['names'][-1])
 
-        return skip_to, tables
+        return skip_to
 
     def get_column_names(self, tree, columns):
+        """Obtiene los nombres de todas las columnas involucradas en un nodo COLUMN_EXPRESSION, asi como sus alias.
+
+        Parameters
+        ----------
+        tree: nltk.Tree
+            Nodo raiz.
+        columns: list(str)
+            Lista de columnas.
+
+        Returns
+        -------
+        list(str)
+            Lista actualizada de columnas.
+        """
         for node in tree:
             if type(node) is nltk.Tree:
                 if node.label() != 'COLUMN_NAMES':
@@ -71,7 +183,7 @@ class Parser:
 
         return columns
 
-    def get_nodes(self, parent, queries={'max': 0}, i=0, root='SELECT_SENTENCE'):
+    def get_nodes(self, parent, queries, i=0, root='SELECT_SENTENCE'):
         queries.update(self.__init_query__(queries, i))
         name_nodes = []
 
@@ -81,12 +193,15 @@ class Parser:
                 if node.label() == root:
                     queries['max'] += 1
                     i = queries['max']
+                    if i > 1:
+                        self.__update_subqueries__(i)
+                        self.logger.debug('Actualizadas subqueries')
                 elif node.label() == 'COLUMN_EXPRESSION':
                     name_nodes.append(node)
                     self.get_column_names(node, queries[i]['columns'])
                 elif parent.label() == 'TABLE_EXPRESSION' and node.label() != 'TABLE_EXPRESSION':
                     name_nodes.append(node)
-                    next_node, _ = self.get_table_name(node, root, queries, i)
+                    next_node = self.get_table_name(node, root, queries, i)
 
                 if not node.label() == 'COLUMN_EXPRESSION':
                     _nodes, _queries = self.get_nodes(self.__skip_to_node__(next_node, node), queries, i)
