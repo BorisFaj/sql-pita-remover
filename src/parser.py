@@ -203,7 +203,7 @@ class Parser:
                 if node.label() != 'COLUMN_NAMES':
                     self.get_column_names(node, columns)
                 elif tree.label() != 'COLUMN_ALIAS':
-                    columns['names'] += [''.join(tree.leaves())]
+                    columns['names'] += [''.join(tree.leaves()).replace('DISTINCT', '')]
                 elif tree.label() == 'COLUMN_ALIAS':
                     columns['alias'].setdefault(node.leaves()[0], columns['names'][-1])
 
@@ -226,12 +226,10 @@ class Parser:
                     self.__reverse_tree.append((node, i))
                     self.get_column_names(node, queries[i]['columns'])
                 elif parent.label() == 'TABLE_EXPRESSION' and node.label() != 'TABLE_EXPRESSION':
-                    #self.__reverse_tree.append((node, i))
                     next_node = self.get_table_name(node, root, queries, i)
 
                 if not node.label() == 'COLUMN_EXPRESSION':
                     self.get_nodes(self.__skip_to_node__(next_node, node), queries, i)
-                    #queries.update(_queries)
 
         return queries
 
