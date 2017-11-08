@@ -244,21 +244,21 @@ class Parser:
         _node = self.__subqueries.pop()
         _node.update({'subquery': i})
 
-    def get_table_name(self, tree, root, i, skip_to=None):
+    def _process_table_name(self, parent, node, root, i, skip_to):
         """Extrae los nombres de las tablas involucradas en este nivel de la query asi como sus alias a partir de un
-        nodo TABLE_EXPRESSION. Las posibles subqueries no se procesan todavia, quedan a la espera de que la funcion
-        que llama a get_table_name itere sobre ellas.
+        nodo TABLE_EXPRESSION. Las posibles subqueries no se procesan todavia, quedan a la espera de que se itere sobre
+        ellas.
 
         Parameters
         ----------
-        tree: nltk.Tree
-            Nodo raiz.
+        parent: nltk.Tree
+            Nodo progenitor del que se procesa.
+        node: nltk.Tree
+            Nodo que se procesa.
         root: str
-            Nombre del nodo que contiene una subquery.
-        queries: dict
-            Diccionario con la informacion de las queries procesadas hasta ahora.
+            Etiqueta del nodo que contiene una subquery.
         i: int
-            Indice actual.
+            Indice de la query actual.
         skip_to: nltk.Tree
             Toma el valor del ultimo nodo procesado para que la funcion que llama a get_table_name pueda saltar
         directamente a ese nodo y no tenga que volver a procesarlo. Si el nodo contiene subqueries, se deuvelve
@@ -272,31 +272,87 @@ class Parser:
         la raiz de la primera subquery.
         """
         tables = self.__queries[i]['tables']
-        for node in tree:
-            if type(node) is nltk.Tree:
-                if node.label() not in ['TABLE_NAMES', root]:
-                    _skip = self.get_table_name(node, root, i, skip_to)
-                    skip_to = self.__skip_to_node__(skip_to, _skip)
-                elif node.label() == root:
-                    # Se evalua si es el primer nodo root encontrado
-                    skip_to = self.__skip_to_node__(skip_to, tree)
-                    # Se extrae el alias (sin AS) y se actualiza el diccionario
-                    _table_name = tree[-1].leaves()[1]
-                    tables['alias'].setdefault(_table_name, {'subquery': 0})
-                    # Se mete a la cola de subqueries
-                    self.__subqueries.append(tables['alias'][_table_name])
-                elif tree.label() != 'TABLE_ALIAS':
-                    tables['names'] += [''.join(node.leaves())]
-                    self.__reverse_tree.append((tree, i))
-                elif tree.label() == 'TABLE_ALIAS':
-                    if tables['names']:  # si no es una subquery
-                        tables['alias'].setdefault(node.leaves()[0], tables['names'][-1])
-                        self.__reverse_tree.append((tree, i))
+        if node.label() not in ['TABLE_NAMES', root]:
+            # Si no es un nodo de tabla, sigue iterando
+            _skip = self.iter_table_node(node, root, i, skip_to)
+            skip_to = self.__skip_to_node__(skip_to, _skip)
+        elif node.label() == root:
+            # Si es el primer nodo root encontrado
+            skip_to = self.__skip_to_node__(skip_to, parent)
+            # Se extrae el alias (sin AS) y se actualiza el diccionario
+            _table_name = parent[-1].leaves()[1]
+            tables['alias'].setdefault(_table_name, {'subquery': 0})
+            # Se mete a la cola de subqueries
+            self.__subqueries.append(tables['alias'][_table_name])
+        elif parent.label() != 'TABLE_ALIAS':
+            # Si es una referencia directa a una tabla
+            tables['names'] += [''.join(node.leaves())]
+            self.__reverse_tree.append((parent, i))
+        elif parent.label() == 'TABLE_ALIAS' and tables['names']:
+            # Si es una referencia a un alias y este no es de una subquery
+            tables['alias'].setdefault(node.leaves()[0], tables['names'][-1])
+            self.__reverse_tree.append((parent, i))
 
         return skip_to
 
-    def get_column_names(self, tree, columns):
-        """Obtiene los nombres de todas las columnas involucradas en un nodo COLUMN_EXPRESSION, asi como sus alias.
+    def iter_table_node(self, tree, root, i, skip_to=None):
+        """Itera sobre los nodos de una referencia a tabla y los va procesando.
+
+        Parameters
+        ----------
+        tree: nltk.Tree
+            Nodo raiz.
+        root: str
+            Etiqueta del nodo que contiene una subquery.
+        i: int
+            Indice de la query actual.
+        skip_to: nltk.Tree
+            Toma el valor del ultimo nodo procesado para que la funcion que llama a get_table_name pueda saltar
+        directamente a ese nodo y no tenga que volver a procesarlo. Si el nodo contiene subqueries, se deuvelve
+        la raiz de la primera subquery.
+
+        Returns
+        -------
+        nltk.Tree
+            Toma el valor del ultimo nodo procesado para que la funcion que llama a get_table_name pueda saltar
+        directamente a ese nodo y no tenga que volver a procesarlo. Si el nodo contiene subqueries, se deuvelve
+        la raiz de la primera subquery.
+        """
+        skip_to = [self._process_table_name(tree, node, root, i, skip_to) for node in self.get_subtrees(tree)]
+
+        return skip_to[0] if skip_to else None
+
+    def _process_column_node(self, parent, node, columns):
+        """Extrae los nombres de las columnas involucradas en los nodos que se procesan.
+
+        Parameters
+        ----------
+        parent: nltk.Tree
+            Nodo progenitor del que se procesa.
+        node: nltk.Tree
+            Nodo que se procesa.
+        columns: list(str)
+            Lista de columnas extraidas hasta ahora.
+
+        Returns
+        -------
+        list(str)
+            Lista de columnas extraidas hasta ahora.
+        """
+        if node.label() != 'COLUMN_NAMES':
+            # Si no es un nodo de columna, sigue iterando
+            self.iter_column_node(node, columns)
+        elif parent.label() != 'COLUMN_ALIAS':
+            # Si es una referencia directa a una columna
+            columns['names'] += [''.join(parent.leaves()).replace('DISTINCT', '')]
+        elif parent.label() == 'COLUMN_ALIAS':
+            # Si es un alias
+            columns['alias'].setdefault(node.leaves()[0], columns['names'][-1])
+
+        return columns
+
+    def iter_column_node(self, tree, columns):
+        """Itera sobre los nodos que hacen referencia a columnas y los va procesando.
 
         Parameters
         ----------
@@ -310,14 +366,7 @@ class Parser:
         list(str)
             Lista actualizada de columnas.
         """
-        for node in tree:
-            if type(node) is nltk.Tree:
-                if node.label() != 'COLUMN_NAMES':
-                    self.get_column_names(node, columns)
-                elif tree.label() != 'COLUMN_ALIAS':
-                    columns['names'] += [''.join(tree.leaves()).replace('DISTINCT', '')]
-                elif tree.label() == 'COLUMN_ALIAS':
-                    columns['alias'].setdefault(node.leaves()[0], columns['names'][-1])
+        columns = [self._process_column_node(tree, node, columns) for node in self.get_subtrees(tree)]
 
         return columns
 
@@ -339,19 +388,25 @@ class Parser:
         """
         next_node = None
         if node.label() == root:
+            # Si es el nodo raiz, actualiza indices de queries y subqueries
             self.__queries['max'] += 1
             i = self.__queries['max']
             self._update_subqueries(i)
         elif node.label() == 'COLUMN_EXPRESSION':
+            # Si es un nodo columna, se mete a la lista de procesados y se explora el trozo de query
             self.__reverse_tree.append((node, i))
-            self.get_column_names(node, self.__queries[i]['columns'])
+            self.iter_column_node(node, self.__queries[i]['columns'])
         elif parent.label() == 'FROM_EXPRESSION' and node.label() != 'TABLE_EXPRESSION':
+            # Si es un nodo from, se mete a la lista de procesados y se explora el trozo de query
             self.__reverse_tree.append((node, i))
-            self.get_column_names(node, self.__queries[i]['columns'])
+            self.iter_column_node(node, self.__queries[i]['columns'])
         elif parent.label() == 'TABLE_EXPRESSION' and node.label() != 'TABLE_EXPRESSION':
-            next_node = self.get_table_name(node, root, i)
+            # Si es un nodo tabla, se explora el trozo de query y se obtiene el nodo de la primera subquery que
+            # contiene, en caso de que contenga alguna
+            next_node = self.iter_table_node(node, root, i)
 
         if not node.label() == 'COLUMN_EXPRESSION':
+            # Si el nodo es de columnas, ya esta procesado y no es necesario profundizar
             self.process_tree(self.__skip_to_node__(next_node, node), i, root)
 
     def process_tree(self, tree, i=0, root='SELECT_SENTENCE'):
@@ -450,6 +505,19 @@ class Parser:
         return str(a).split('.')[-1].upper() == str(b).split('.')[-1].upper()
 
     def get_unreferenced_table(self, i):
+        """Obtiene la tabla en una query en la que las columnas no llevan referencias a tablas. Solo es posible
+        deducirlo si la query hace referencia a una sola tabla.
+
+        Parameters
+        ----------
+        i: int
+            Indice de la query actual.
+
+        Returns
+        -------
+        str
+            Nombre de la tabla referenciada en la query indicada.
+        """
         tables = self.__queries[i]['tables']['names']
         if len(tables) > 1:
             raise UnreferencedTableError(tables)
@@ -458,12 +526,52 @@ class Parser:
 
     @staticmethod
     def is_referenced_column(column):
+        """Comprueba si la columna indicada lleva alguna referencia a tabla.
+
+        Parameters
+        ----------
+        column: str
+            Nombre de columna tal y como aparece en la query.
+
+        Returns
+        -------
+        boolean
+        """
         return len(column.split('.')) > 1
 
     def is_column_alias(self, column, i):
+        """Comprueba si la columna indicada hace referencia a un alias.
+
+        Parameters
+        ----------
+        column: str
+            Nombre a comprobar.
+        i: int
+            Indice de la query actual.
+
+        Returns
+        -------
+        boolean
+        """
         return column in self.__queries[i]['columns']['alias']
 
     def get_referenced_names(self, names, i):
+        """Obtiene, a partir de una referencia a columna, la tabla y la columna. Si no lleva referencia explicita a
+        la tabla, la query solo puede consultar una tabla, en otro caso hay un error semantico y no se puede saber a
+        quien se hace referencia.
+
+        Parameters
+        ----------
+        names: str
+            Referencia a la tabla.
+        i: int
+            Indice de la query procesada.
+
+        Returns
+        -------
+        (str, str)
+            Nombre de tabla, nombre de columna.
+        """
         if self.is_referenced_column(names):
             return names.split('.')
         else:
@@ -479,12 +587,12 @@ class Parser:
         current_column: str
             Nombre actual de la columna.
         target_i: int
-            Indice de la query que le hace referencia.
+            Indice de la subquery a la que se hace referencia.
 
         Returns
         -------
-        str
-            Nombre nuevo de la columna.
+        (str, str)
+            Nombre de la subtabla, nombre de la subcolumna.
         """
         if self.is_column_alias(current_column, target_i):
             # Si se trata de un alias, no lleva referencia de columna
@@ -511,7 +619,7 @@ class Parser:
             return table, current_column
 
     def find_sub_column(self, current_table, current_column, i):
-        """Cambia el nombre de una "subcolumna", es decir, una columna que hace referencia a una subquery.
+        """Dada una columna que hace referencia a una subquery, devuelve el nombre de la columna dentro de la subquery.
 
         Parameters
         ----------
@@ -525,7 +633,7 @@ class Parser:
         Returns
         -------
         str
-            Nombre nuevo de la columna.
+            Nombre de la subcolumna.
         """
         child_index = self.__queries[i]['tables']['alias'][current_table]['subquery']
         new_table, new_column = self.get_reference_in_subquery(current_column, child_index)
@@ -556,14 +664,14 @@ class Parser:
             # Si es un alias que no pertenece a una subquery
             real_name = self.__queries[i]['tables']['alias'][table_name]
             new_table = table_name
-            new_column = self.__mapping[real_name]['fields'][column_name]
+            new_column = self.__mapping[real_name]['fields'].get(column_name, column_name)
         elif self.is_subquery(table_name, i):
             # Si es una subquery
             new_table = table_name  # el nombre de tabla es un alias
             new_column = self.find_sub_column(table_name, column_name, i)
         else:
             # Si es una referencia normal
-            new_table = self.__mapping[table_name]['new_name']
+            new_table = self.__mapping[table_name].get('new_name', table_name)
             new_column = self.__mapping[table_name]['fields'].get(column_name, column_name)
 
         return new_table, new_column
@@ -624,7 +732,21 @@ class Parser:
         """
         return parent.label() == 'TABLE_REFERENCE' and node.label() == 'TABLE_NAMES'
 
-    def _rename_unreferenced(self, node, i):
+    def _rename_orphan_column(self, node, i):
+        """Renombra una columna que no lleva referencia a ninguna tabla.
+
+        Parameters
+        ----------
+        node: nltk.Tree
+            Nodo que contiene la referencia a la columna.
+        i: int
+            Indice de la query actual.
+
+        Returns
+        -------
+        (str, str)
+            Nombre nuevo de la tabla, nombre nuevo de la columna
+        """
         tables = self.__queries[i]['tables']['names']
         table_name = None
         new_column = None
@@ -635,7 +757,8 @@ class Parser:
             table_name = next(iter(self.__queries[i]['tables']['alias']))
             table_name, new_column = self.change_column_name(table_name, node[1][0], i)
         elif not self.is_column_alias(node[1][0], i):
-            # Si no es un alias que haga referencia a la propia tabla, en una clausula where por ejemplo
+            # Si no es un alias que haga referencia a la propia tabla, en una clausula where por ejemplo, sino que es
+            # una referencia a una columna sin referencia a tabla
             table_name = tables[0]
             new_column = self.__mapping[table_name]['fields'][node[1][0]]
 
@@ -659,7 +782,7 @@ class Parser:
             node[1][0], node[3][0] = self.change_column_name(node[1][0], node[3][0], i)
         elif self.is_unreferenced_column_node(node, child):
             # Columna sin referencia a su tabla. Solo se acepta si hay solamente 1 tabla
-            _, _new_column = self._rename_unreferenced(node, i)
+            _, _new_column = self._rename_orphan_column(node, i)
             node[1][0] = _new_column if _new_column else node[1][0]
         elif self.is_table(node, child):
             # Tabla
