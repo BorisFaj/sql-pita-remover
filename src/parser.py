@@ -6,6 +6,7 @@ import nltk
 import re
 import os
 import json
+from operator import itemgetter
 
 
 class Parser:
@@ -137,7 +138,7 @@ class Parser:
 
         return current
 
-    def __init_query__(self, i):
+    def _init_query(self, i):
         """Inicializa una query con el formato especifico utilizado en la clase.
 
         Parameters
@@ -159,6 +160,18 @@ class Parser:
         return self.__queries
 
     def load_json(self, path):
+        """Cargar un fichero json en un diccionario.
+
+        Parameters
+        ----------
+        path: str
+            Ruta al fichero json.
+
+        Returns
+        -------
+        dict
+            Diccionario que representa el json especificado.
+        """
         if not os.path.exists(path):
             raise FileNotFoundError('No se encuentra el fichero especificado: {}'.format(path))
 
@@ -166,6 +179,18 @@ class Parser:
         return json.load(js)
 
     def _load_mapping_files(self, path):
+        """Carga los ficheros de mapping contenidos en el directorio especificado en un diccionario.
+
+        Parameters
+        ----------
+        path: str
+            Directorio que contiene los json de mapping.
+
+        Returns
+        -------
+        dict
+            Diccionario que representa todos los ficheros de mapping.
+        """
         if not os.path.isdir(path):
             raise FileNotFoundError('No se encuentra la ruta especificada: {}'.format(path))
 
@@ -193,7 +218,7 @@ class Parser:
 
         return parser.parse(sent)
 
-    def __update_subqueries__(self, i):
+    def _update_subqueries(self, i):
         """Cuando se lee un nodo que representa una subquery, este se almacena en una cola a la espera de saber
         el indice de esa subquery. Cuando la siguiente subquery empieza a procesarse, coge el ultimo elemento de la
         cola y le asigna su indice.
@@ -289,45 +314,61 @@ class Parser:
 
         return columns
 
-    def get_nodes(self, parent, i=0, root='SELECT_SENTENCE'):
-        """Recorre el AST y va actualizando el diccionario de queries (self.__queries). Extrae los nombres de columnas y
-        tablas y sus alias correspondientes. Si un alias hace referencia a un subquery, se almacena el indice de la
-        subquery. Al mismo tiempo se van insertando los nodos procesados que contienen nombres de tablas o columnas
-        en una lista (self.__reverse_tree).
+    def _process_node(self, node, parent, root, i):
+        """Realiza el procesamiento de un nodo. Extrae los nombres de columnas y tablas y sus alias correspondientes.
+        Si un alias hace referencia a un subquery, se almacena el indice de la subquery. Al mismo tiempo se van
+        insertando los nodos procesados que contienen nombres de tablas o columnas en una lista (self.__reverse_tree).
 
         Parameters
         ----------
-        parent: nltk.Tree
+        node: nltk.Tree
+            Nodo a procesar.
+        parent: nltl.Tree
+            Nodo progenitor del que se esta procesando.
+        root: str
+            Etiqueta del nodo raiz de una consulta.
+        i: int
+            Indice de la query procesada.
+        """
+        next_node = None
+        if node.label() == root:
+            self.__queries['max'] += 1
+            i = self.__queries['max']
+            self._update_subqueries(i)
+        elif node.label() == 'COLUMN_EXPRESSION':
+            self.__reverse_tree.append((node, i))
+            self.get_column_names(node, self.__queries[i]['columns'])
+        elif parent.label() == 'FROM_EXPRESSION' and node.label() != 'TABLE_EXPRESSION':
+            self.__reverse_tree.append((node, i))
+            self.get_column_names(node, self.__queries[i]['columns'])
+        elif parent.label() == 'TABLE_EXPRESSION' and node.label() != 'TABLE_EXPRESSION':
+            next_node = self.get_table_name(node, root, i)
+
+        if not node.label() == 'COLUMN_EXPRESSION':
+            self.process_tree(self.__skip_to_node__(next_node, node), i, root)
+
+    def process_tree(self, tree, i=0, root='SELECT_SENTENCE'):
+        """Recorre el AST y va actualizando el diccionario de queries (self.__queries).
+
+        Parameters
+        ----------
+        tree: nltk.Tree
             Nodo raiz sobre el que se itera.
         i: int
             Indice de la query procesada.
         root: str
             Etiqueta del nodo raiz de una consulta select.
         """
-        self.__queries.update(self.__init_query__(i + 1))
-
-        for node in parent:
-            next_node = None
-            if type(node) is nltk.Tree:
-                if node.label() == root:
-                    self.__queries['max'] += 1
-                    i = self.__queries['max']
-                    self.__update_subqueries__(i)
-                elif node.label() == 'COLUMN_EXPRESSION':
-                    self.__reverse_tree.append((node, i))
-                    self.get_column_names(node, self.__queries[i]['columns'])
-                elif parent.label() == 'FROM_EXPRESSION' and node.label() != 'TABLE_EXPRESSION':
-                    self.__reverse_tree.append((node, i))
-                    self.get_column_names(node, self.__queries[i]['columns'])
-                elif parent.label() == 'TABLE_EXPRESSION' and node.label() != 'TABLE_EXPRESSION':
-                    next_node = self.get_table_name(node, root, i)
-
-                if not node.label() == 'COLUMN_EXPRESSION':
-                    self.get_nodes(self.__skip_to_node__(next_node, node), i)
+        self.__queries.update(self._init_query(i + 1))
+        [self._process_node(node, tree, root, i) for node in self.get_subtrees(tree)]
 
     def get_reverse_tree(self):
         """Devuelve la lista de nodos extraidos en la funcion get_nodes."""
-        return self.__reverse_tree
+        if not self.__reverse_tree:
+            raise AssertionError('La query todavia no ha sido procesada. Por favor, ejecuta la funcion process_tree()'
+                                 'antes de volver a intentarlo.')
+
+        return sorted(self.__reverse_tree, key=itemgetter(1), reverse=True)
 
     def get_queries(self):
         """Devuelve el diccionario de queries extraido en la funcion get_nodes."""
@@ -368,6 +409,22 @@ class Parser:
         return 'subquery' in self.__queries[i]['tables']['alias'].get(name, {})
 
     @staticmethod
+    def get_subtrees(tree):
+        """Obtiene los subarboles contenidos en un arbol, ignorando las hojas.
+
+        Parameters
+        ----------
+        tree: nltk.Tree
+            Arbol a consultar.
+
+        Returns
+        -------
+        filter
+            Lista filtrada de subarboles.
+        """
+        return filter(lambda child: isinstance(child, nltk.Tree), tree)
+
+    @staticmethod
     def equal_columns(a, b):
         """Comprueba que las columnas a y b son la misma, independientemente de su tabla.
 
@@ -403,14 +460,22 @@ class Parser:
             Nombre nuevo de la columna.
         """
         if column in self.__queries[i]['columns']['alias']:
+            # Si se trata de un alias, no lleva referencia de columna
             return '', column
 
         try:
             new_reference = [e for e in self.__queries[i]['columns']['names'] if self.equal_columns(column, e)][0]
-        except IndexError:  # La columna puede no estar en la query pero pertenece a la tabla
-            return table, self.__mapping[table]['fields'][column]
+            return new_reference.split('.') if '.' in new_reference else ('', new_reference)
+        except IndexError:
+            # La columna puede no estar en la query, pero pertenecer a la tabla
+            pass
 
-        return new_reference.split('.') if '.' in new_reference else ('', new_reference)
+        try:
+            return table, self.__mapping[table]['fields'][column]
+        except KeyError as err:
+            raise KeyError(
+                'La referencia a la columna {} de la tabla {} no se encuentra en los ficheros de mapping '
+                'proporcionados. {}'.format(column, table, err))
 
     def find_sub_column(self, table, column, i):
         """Cambia el nombre de una "subcolumna", es decir, una columna que hace referencia a una subquery.
@@ -454,7 +519,6 @@ class Parser:
         str, str
             Nombres nuevos de la tabla y la columna.
         """
-        #     print('Tabla: {} - Column: {} - i: {}'.format(table_name, column_name, i))
         if not self.is_subquery(table_name, i) and self.is_table_alias(table_name, i):
             # Si es un alias que no pertenece a una subquery
             real_name = self.__queries[i]['tables']['alias'][table_name]
@@ -471,9 +535,51 @@ class Parser:
 
         return new_table, new_column
 
-    def change_name(self, node, i):
-        """Cambia los nombres de tablas y columnas por los proporcionados en los ficheros de mapping.
-        Los cambios tienen lugar en el propio arbol recibido por parametro, ya que es un objeto mutable.
+    def _process_names(self, node, child, i):
+        """Procesa un nodo del AST. En caso de que este contenga un nombre de tabla o columna, lo renombra, en otro
+        caso, continua recorriendo en profundidad el nodo.
+
+        Parameters
+        ----------
+        node: nltk.Tree
+            Nodo progenitor del que se procesa.
+        child: nltk.Tree
+            Nodo a procesar.
+        i: int
+            Indice de la query que se esta procesando.
+        """
+        if node.label() == 'COLUMN_REFERENCE' and child.label() == 'TABLE_NAMES' and node[1].label() == 'TABLE_NAMES':
+            # Columna con referencia a su tabla
+            table_name = node[1][0]
+            column_name = node[3][0]
+            print('Columna con referencia. Tabla: {} - Columna: {}'.format(table_name, column_name))
+            node[1][0], node[3][0] = self.change_column_name(table_name, column_name, i)
+        elif node.label() == 'COLUMN_REFERENCE' and len(node) > 1 and node[1].label() == 'COLUMN_NAMES' and child.label() == 'COLUMN_NAMES':
+            # Columna sin referencia a su tabla. Solo se acepta si hay solamente 1 tabla
+            if len(self.__queries[i]['tables']['names']) > 1:
+                raise ValueError('Le falta referencia a la tabla o sobran tablas en el from: {}'.format(node))
+
+            if not self.__queries[i]['tables']['names']:
+                # Si tiene las tablas vacias, hace referencia a un alias
+                table_name = next(iter(self.__queries[i]['tables']['alias']))
+                column_name = node[1][0]
+                print('Las mando')
+                _, node[1][0] = self.change_column_name(table_name, column_name, i)
+            elif node[1][0] not in self.__queries[i]['columns']['alias']:
+                # Comprueba que no es un alias de la propia tabla en una clausula where por ejemplo
+                print('columna: {}'.format(node[1][0]))
+                _table_name = self.__queries[i]['tables']['names'][0]
+                print('tabla: {}'.format(_table_name))
+                node[1][0] = self.__mapping[_table_name]['fields'][node[1][0]]
+        elif node.label() == 'TABLE_REFERENCE' and child.label() == 'TABLE_NAMES':
+            # Tabla
+            child[0] = self.__mapping[child[0]]['new_name']
+        else:
+            self.rename_nodes(child, i)
+
+    def rename_nodes(self, node, i):
+        """Renombra las tablas y las columnas de acuerdo a los ficheros de mapping. Los cambios tienen lugar en el
+        propio arbol recibido por parametro, ya que es un objeto mutable.
 
         Parameters
         ----------
@@ -482,34 +588,8 @@ class Parser:
         i: int
             Indice de la query que se esta procesando.
         """
-        for child in filter(lambda child: isinstance(child, nltk.Tree), node):
-            #         print('node: {} - child: {}'.format(node.label(), child.label()))
-            if node.label() == 'COLUMN_REFERENCE' and child.label() == 'TABLE_NAMES' and node[1].label() == 'TABLE_NAMES':
-                # Columna con referencia a su tabla
-                table_name = node[1][0]
-                column_name = node[3][0]
-                print('Columna con referencia. Tabla: {} - Columna: {}'.format(table_name, column_name))
-                node[1][0], node[3][0] = self.change_column_name(table_name, column_name, i)
-            elif node.label() == 'COLUMN_REFERENCE' and len(node) > 1 and node[
-                1].label() == 'COLUMN_NAMES' and child.label() == 'COLUMN_NAMES':
-                # Columna sin referencia a su tabla. Solo se acepta si hay solamente 1 tabla
-                if len(self.__queries[i]['tables']['names']) > 1:
-                    raise ValueError('Le falta referencia a la tabla o sobran tablas en el from: {}'.format(node))
+        [self._process_names(node, child, i) for child in self.get_subtrees(node)]
 
-                if not self.__queries[i]['tables']['names']:
-                    # Si tiene las tablas vacias, hace referencia a un alias
-                    table_name = next(iter(self.__queries[i]['tables']['alias']))
-                    column_name = node[1][0]
-                    print('Las mando')
-                    _, node[1][0] = self.change_column_name(table_name, column_name, i)
-                elif node[1][0] not in self.__queries[i]['columns']['alias']:
-                    # Comprueba que no es un alias de la propia tabla en una clausula where por ejemplo
-                    print('columna: {}'.format(node[1][0]))
-                    _table_name = self.__queries[i]['tables']['names'][0]
-                    print('tabla: {}'.format(_table_name))
-                    node[1][0] = self.__mapping[_table_name]['fields'][node[1][0]]
-            elif node.label() == 'TABLE_REFERENCE' and child.label() == 'TABLE_NAMES':
-                # Tabla
-                child[0] = self.__mapping[child[0]]['new_name']
-            else:
-                self.change_name(child, i)
+    def rename_tree(self):
+        """Lleva a cabo el renombramiento del AST anteriormente procesado."""
+        [self.rename_nodes(e[0], e[1]) for e in self.get_reverse_tree()]
