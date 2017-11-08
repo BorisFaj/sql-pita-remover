@@ -9,6 +9,13 @@ import json
 from operator import itemgetter
 
 
+class UnreferencedTableError(Exception):
+    def __init__(self, tables):
+        super(UnreferencedTableError, self).__init__('Se ha solicitado el nombre de una tabla no referenciada '
+                                                     'explicitamente en la query pero la query hace referencia a mas '
+                                                     'de una tabla: {}'.format(tables))
+
+
 class Parser:
     def __init__(self, conf_path, conf_file):
         logging.basicConfig(level=logging.DEBUG, format='%(levelname)s %(name)s %(asctime)s %(message)s')
@@ -442,16 +449,36 @@ class Parser:
         """
         return str(a).split('.')[-1].upper() == str(b).split('.')[-1].upper()
 
-    def get_column_in_query(self, table, column, i):
+    def get_unreferenced_table(self, i):
+        tables = self.__queries[i]['tables']['names']
+        if len(tables) > 1:
+            raise UnreferencedTableError(tables)
+
+        return tables[0]
+
+    @staticmethod
+    def is_referenced_column(column):
+        return len(column.split('.')) > 1
+
+    def is_column_alias(self, column, i):
+        return column in self.__queries[i]['columns']['alias']
+
+    def get_referenced_names(self, names, i):
+        if self.is_referenced_column(names):
+            return names.split('.')
+        else:
+            return self.get_unreferenced_table(i), names
+
+    def get_reference_in_subquery(self, current_column, target_i):
         """Encuentra el nombre que tiene una columna dentro de una subquery determinada.
 
         Parameters
         ----------
-        table: str
+        current_table: str
             Nombre de la tabla a la que hace referencia actualmente.
-        column: str
+        current_column: str
             Nombre actual de la columna.
-        i: int
+        target_i: int
             Indice de la query que le hace referencia.
 
         Returns
@@ -459,32 +486,38 @@ class Parser:
         str
             Nombre nuevo de la columna.
         """
-        if column in self.__queries[i]['columns']['alias']:
+        if self.is_column_alias(current_column, target_i):
             # Si se trata de un alias, no lleva referencia de columna
-            return '', column
+            return '', current_column
 
         try:
-            new_reference = [e for e in self.__queries[i]['columns']['names'] if self.equal_columns(column, e)][0]
-            return new_reference.split('.') if '.' in new_reference else ('', new_reference)
+            # Busca coincidencias en la subquery con el nombre de la columna actual
+            new_reference = [e for e in self.__queries[target_i]['columns']['names'] if
+                             self.equal_columns(current_column, e)]
+            return self.get_referenced_names(new_reference[0], target_i)
         except IndexError:
-            # La columna puede no estar en la query, pero pertenecer a la tabla
+            # La columna puede no estar en la subquery, pero pertenecer a la subtabla
             pass
 
-        try:
-            return table, self.__mapping[table]['fields'][column]
-        except KeyError as err:
-            raise KeyError(
-                'La referencia a la columna {} de la tabla {} no se encuentra en los ficheros de mapping '
-                'proporcionados. {}'.format(column, table, err))
+        # Si no es un alias y va sin referencia a tabla, esta haciendo referencia a una columna de la subquery que no
+        # aparece en la consulta pero que deberia existir. Esto solo se permite si la subquery consulta una sola tabla
+        table = self.get_unreferenced_table(target_i)
 
-    def find_sub_column(self, table, column, i):
+        try:
+            return table, self.__mapping[table]['fields'][current_column]
+        except KeyError as err:
+            self.logger.warning("{}. La referencia a la columna '{}' de la tabla '{}' no se encuentra en los ficheros "
+                                "de mapping proporcionados. Se devuelve el nombre original".format(err, current_column, table))
+            return table, current_column
+
+    def find_sub_column(self, current_table, current_column, i):
         """Cambia el nombre de una "subcolumna", es decir, una columna que hace referencia a una subquery.
 
         Parameters
         ----------
-        table: str
+        current_table: str
             Nombre de la tabla a la que hace referencia actualmente.
-        column: str
+        current_column: str
             Nombre actual de la columna.
         i: int
             Indice de la query que le hace referencia.
@@ -494,10 +527,10 @@ class Parser:
         str
             Nombre nuevo de la columna.
         """
-        child_index = self.__queries[i]['tables']['alias'][table]['subquery']
-        new_table, new_column = self.get_column_in_query(table, column, child_index)
+        child_index = self.__queries[i]['tables']['alias'][current_table]['subquery']
+        new_table, new_column = self.get_reference_in_subquery(current_column, child_index)
 
-        if not new_table:  # era el alias
+        if not new_table:  # era un alias
             return new_column
 
         return self.change_column_name(new_table, new_column, child_index)[1]
@@ -535,6 +568,79 @@ class Parser:
 
         return new_table, new_column
 
+    @staticmethod
+    def is_referenced_column_node(parent, node):
+        """Comprueba si el nodo pertenece a una columna con referencia a su tabla.
+
+        Parameters
+        ----------
+        parent: nltk.Tree
+            Nodo progenitor del nodo que se comprueba.
+        node: nltk.Tree
+            Nodo que se comprueba.
+
+        Returns
+        -------
+        Boolean
+        """
+        return parent.label() == 'COLUMN_REFERENCE' \
+               and node.label() == 'TABLE_NAMES' \
+               and parent[1].label() == 'TABLE_NAMES'
+
+    @staticmethod
+    def is_unreferenced_column_node(parent, node):
+        """Comprueba si el nodo pertenece a una columna sin referencias a su tabla.
+
+        Parameters
+        ----------
+        parent: nltk.Tree
+            Nodo progenitor del nodo que se comprueba.
+        node: nltk.Tree
+            Nodo que se comprueba.
+
+        Returns
+        -------
+        Boolean
+        """
+        return parent.label() == 'COLUMN_REFERENCE' \
+               and len(parent) > 1 \
+               and parent[1].label() == 'COLUMN_NAMES' \
+               and node.label() == 'COLUMN_NAMES'
+
+    @staticmethod
+    def is_table(parent, node):
+        """Comprueba si el nodo pertenece a una tabla.
+
+        Parameters
+        ----------
+        parent: nltk.Tree
+            Nodo progenitor del nodo que se comprueba.
+        node: nltk.Tree
+            Nodo que se comprueba.
+
+        Returns
+        -------
+        Boolean
+        """
+        return parent.label() == 'TABLE_REFERENCE' and node.label() == 'TABLE_NAMES'
+
+    def _rename_unreferenced(self, node, i):
+        tables = self.__queries[i]['tables']['names']
+        table_name = None
+        new_column = None
+        if len(tables) > 1:
+            raise UnreferencedTableError(tables)
+        elif not tables:
+            # Si tiene las tablas vacias, hace referencia a un alias
+            table_name = next(iter(self.__queries[i]['tables']['alias']))
+            table_name, new_column = self.change_column_name(table_name, node[1][0], i)
+        elif not self.is_column_alias(node[1][0], i):
+            # Si no es un alias que haga referencia a la propia tabla, en una clausula where por ejemplo
+            table_name = tables[0]
+            new_column = self.__mapping[table_name]['fields'][node[1][0]]
+
+        return table_name, new_column
+
     def _process_names(self, node, child, i):
         """Procesa un nodo del AST. En caso de que este contenga un nombre de tabla o columna, lo renombra, en otro
         caso, continua recorriendo en profundidad el nodo.
@@ -548,32 +654,16 @@ class Parser:
         i: int
             Indice de la query que se esta procesando.
         """
-        if node.label() == 'COLUMN_REFERENCE' and child.label() == 'TABLE_NAMES' and node[1].label() == 'TABLE_NAMES':
-            # Columna con referencia a su tabla
-            table_name = node[1][0]
-            column_name = node[3][0]
-            print('Columna con referencia. Tabla: {} - Columna: {}'.format(table_name, column_name))
-            node[1][0], node[3][0] = self.change_column_name(table_name, column_name, i)
-        elif node.label() == 'COLUMN_REFERENCE' and len(node) > 1 and node[1].label() == 'COLUMN_NAMES' and child.label() == 'COLUMN_NAMES':
+        if self.is_referenced_column_node(node, child):
+            # Columna con referencia a su tabla. El hijo de indice 1 es la tabla y el 3 la columna
+            node[1][0], node[3][0] = self.change_column_name(node[1][0], node[3][0], i)
+        elif self.is_unreferenced_column_node(node, child):
             # Columna sin referencia a su tabla. Solo se acepta si hay solamente 1 tabla
-            if len(self.__queries[i]['tables']['names']) > 1:
-                raise ValueError('Le falta referencia a la tabla o sobran tablas en el from: {}'.format(node))
-
-            if not self.__queries[i]['tables']['names']:
-                # Si tiene las tablas vacias, hace referencia a un alias
-                table_name = next(iter(self.__queries[i]['tables']['alias']))
-                column_name = node[1][0]
-                print('Las mando')
-                _, node[1][0] = self.change_column_name(table_name, column_name, i)
-            elif node[1][0] not in self.__queries[i]['columns']['alias']:
-                # Comprueba que no es un alias de la propia tabla en una clausula where por ejemplo
-                print('columna: {}'.format(node[1][0]))
-                _table_name = self.__queries[i]['tables']['names'][0]
-                print('tabla: {}'.format(_table_name))
-                node[1][0] = self.__mapping[_table_name]['fields'][node[1][0]]
-        elif node.label() == 'TABLE_REFERENCE' and child.label() == 'TABLE_NAMES':
+            _, _new_column = self._rename_unreferenced(node, i)
+            node[1][0] = _new_column if _new_column else node[1][0]
+        elif self.is_table(node, child):
             # Tabla
-            child[0] = self.__mapping[child[0]]['new_name']
+            child[0] = self.__mapping[child[0]].get('new_name', child[0])
         else:
             self.rename_nodes(child, i)
 
