@@ -110,22 +110,38 @@ def process_row(e, all_jsons, sep):
     [__process_table__(table, e, all_jsons, original_index) for table in e[0].split(sep)]
 
 
-if __name__ == "__main__":
-    # Leer los parametros
-    conf = parser.parse_args()
+def process_all(excel_path, sep, conf_path):
+    """Ejecuta todo el proceso de parseo de excels y persiste los datos procesados en ficheros json en la ruta indicada
+    por paramerto.
 
+    Parameters
+    ----------
+    excel_path: str
+        Ruta al fichero excel a procesar.
+    sep: str
+        Caracter que separa los nombres de las tablas, cuando hay mas de una en esa fila.
+    conf_path: str
+        Ruta a la carpeta de configuracion donde se van a almacenar los json.
+    """
     # Cargar el excel
-    raw = pd.read_excel(conf.excel_path)
+    raw = pd.read_excel(excel_path)
     df = raw.dropna(subset=[raw.columns[0]])
     logging.info('De las {} filas originales, solo {} van informadas en la primera columna'
                  .format(raw.shape[0], df.shape[0]))
 
     # Procesar el excel
     all_json = {}
-    df.apply(lambda x: process_row(x, all_json, conf.sep), axis=1)
+    df.apply(lambda x: process_row(x, all_json, sep), axis=1)
 
     # Persistir los json
     for conf_file in all_json.keys():
-        write_json(conf.conf_path, all_json[conf_file])
+        write_json(conf_path, all_json[conf_file])
 
-    logging.info('Procesamiento finalizado, los json con los mapeos estan guardados en {}'.format(conf.conf_path))
+    logging.info('Procesamiento finalizado, los json con los mapeos estan guardados en {}'.format(conf_path))
+
+
+if __name__ == "__main__":
+    # Leer los parametros
+    conf = parser.parse_args()
+    # Procesar
+    process_all(conf.excel_path, conf.sep, conf.conf_path)
