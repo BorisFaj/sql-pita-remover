@@ -17,8 +17,8 @@ class UnreferencedTableError(Exception):
 
 
 class Parser:
-    def __init__(self, conf_path, conf_file):
-        logging.basicConfig(level=logging.DEBUG, format='%(levelname)s %(name)s %(asctime)s %(message)s')
+    def __init__(self, conf_path, conf_file, log_level=logging.INFO):
+        logging.basicConfig(level=log_level, format='%(levelname)s %(name)s %(asctime)s %(message)s')
         self.logger = logging.getLogger('hive_parser')
         self._config = self.load_json(os.path.join(conf_path, conf_file))
         self.__grammar = self._read_grammar_(os.path.join(conf_path, self._config['grammar_file']))
