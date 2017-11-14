@@ -21,12 +21,67 @@ class Parser:
         logging.basicConfig(level=log_level, format='%(levelname)s %(name)s %(asctime)s %(message)s')
         self.logger = logging.getLogger('hive_parser')
         self._config = self.load_json(os.path.join(conf_path, conf_file))
-        self.__grammar = self._read_grammar_(os.path.join(conf_path, self._config['grammar_file']))
+        self._conf_path = conf_path
         #self.__mapping = self._load_mapping_files(os.path.join(conf_path, self._config['mapping_dir']))
         self.__mapping = self.__init_debug_mapping()  # ToDo: utilizar los ficheros de mapping en lugar de esto
-        self.__subqueries = []
+        self.__queries_elements = []
         self.__reverse_tree = []
         self.__queries = {}
+        self.__comments = []
+        self.__words = []
+        self._terminals = None
+        self._queries = self.clean_queries(self.load_queries())
+        self.__grammar = self._read_grammar_(os.path.join(conf_path, self._config['grammar_file']))
+
+    def get_grammar(self):
+        return self.__grammar
+
+    @staticmethod
+    def read_query(query):
+        with open(query, 'r') as file:
+            return [line.replace('\n', ' ').replace('\t', ' ') for line in file.readlines()]
+
+    def load_queries(self):
+        return (self.read_query(os.path.join(self._config['input_path'], query))
+                for query in os.listdir(self._config['input_path']))
+
+    @staticmethod
+    def str_to__terminal(s):
+        if '.' in s:
+            return ["'" + t + "'" for t in s.split('.')]
+        else:
+            s = "'" + s + "'"
+            return s, s
+
+    def _read_grammar_(self, path, new_terminals=None):
+        """Lee las reglas de produccion de la gramatica contenidas en el fichero indicado.
+
+        Parameters
+        ----------
+        path: str
+            Ruta al fichero que contiene las reglas de produccion de la gramatica.
+
+        Returns
+        -------
+        nltk.grammar.CFG
+            Objeto nltk que contiene la gramatica libre de contexto leida.
+        """
+        f = open(path, 'r')
+        grammar_file = ' '.join(f.readlines())
+        self._terminals = [t.upper().strip().replace("'", "") for t in self.find_between(grammar_file, "'", "'")]
+        if new_terminals:
+            #self._terminals += new_terminals
+            new_tables, new_columns = zip(*[self.str_to__terminal(t) for t in new_terminals])
+            tables = '\nTABLE_NAMES -> ' + '|'.join(new_tables)
+            columns = '\nCOLUMN_NAMES ->' + '|'.join(new_columns)
+
+            self.logger.debug('Tablas nuevas: {}'.format(tables))
+            self.logger.debug('Columnas nuevas: {}'.format(columns))
+
+            return nltk.CFG.fromstring(grammar_file + tables + columns)
+
+        else:
+            return nltk.CFG.fromstring(grammar_file)
 
     @staticmethod
     def __init_debug_mapping():
@@ -108,23 +163,6 @@ class Parser:
         return mapping
 
     @staticmethod
-    def _read_grammar_(path):
-        """Lee las reglas de produccion de la gramatica contenidas en el fichero indicado.
-
-        Parameters
-        ----------
-        path: str
-            Ruta al fichero que contiene las reglas de produccion de la gramatica.
-
-        Returns
-        -------
-        nltk.grammar.CFG
-            Objeto nltk que contiene la gramatica libre de contexto leida.
-        """
-        f = open(path, 'r')
-        return nltk.CFG.fromstring(' '.join(f.readlines()))
-
-    @staticmethod
     def __skip_to_node__(target, current):
         """Devuelve el nodo target si este no es null, en otro caso devuelve el current.
 
@@ -203,7 +241,7 @@ class Parser:
 
         return {f: self.load_json(os.path.join(path, f)) for f in os.listdir(path)}
 
-    def parse_query(self, query):
+    def parse_query(self, query, trace=0):
         """Parsea una query en texto plano para transformarla en una sentencia de la gramatica.
             1. Se ponen espacio a cada lado de los signos de puntuacion, parentesis, etc.
             2. Si quedan varios espacios seguidos, se simplifican a un espacio.
@@ -220,8 +258,11 @@ class Parser:
             Devuelve los arboles de sintaxis que representan la query parseada.
         """
         sent = query.replace(',', ' , ').replace('.', ' . ').replace('(', ' ( ').replace(')', ' ) ')
-        sent = [chunk for chunk in re.sub(' +', ' ', sent).split(' ') if chunk]
-        parser = nltk.ChartParser(self.__grammar)
+        sent = [chunk.upper() for chunk in re.sub(' +', ' ', sent).split(' ') if chunk]
+        new_terminals = set(filter(lambda x: x not in self._terminals, sent))
+        self.__grammar = self._read_grammar_(os.path.join(self._conf_path, self._config['grammar_file']), new_terminals)
+        self.logger.debug('Sent: {}'.format(sent))
+        parser = nltk.ChartParser(self.__grammar, trace=trace)
 
         return parser.parse(sent)
 
@@ -237,11 +278,11 @@ class Parser:
         """
         # cuando se procesa la query raiz de todas, no habra subqueries
         # tampoco cuando sea la segunda parte de un union
-        if not len(self.__subqueries):
+        if not len(self.__queries_elements):
             self.logger.debug('No hay subqueries para asignar la numero {}'.format(i))
             return
 
-        _node = self.__subqueries.pop()
+        _node = self.__queries_elements.pop()
         _node.update({'subquery': i})
 
     def _process_table_name(self, parent, node, root, i, skip_to):
@@ -283,7 +324,7 @@ class Parser:
             _table_name = parent[-1].leaves()[1]
             tables['alias'].setdefault(_table_name, {'subquery': 0})
             # Se mete a la cola de subqueries
-            self.__subqueries.append(tables['alias'][_table_name])
+            self.__queries_elements.append(tables['alias'][_table_name])
         elif parent.label() != 'TABLE_ALIAS':
             # Si es una referencia directa a una tabla
             tables['names'] += [''.join(node.leaves())]
@@ -806,3 +847,67 @@ class Parser:
     def rename_tree(self):
         """Lleva a cabo el renombramiento del AST anteriormente procesado."""
         [self.rename_nodes(e[0], e[1]) for e in self.get_reverse_tree()]
+
+    def remove_comment(self, line):
+        m = re.search(r'--.*', line)
+        if m:
+            comment = m.group(0)
+            self.__comments.append(comment.strip())
+            return line.replace(comment, '')
+        else:
+            return line
+
+    @staticmethod
+    def find_numbers(line):
+        line = re.sub(r' +', ' ', line).strip()
+        all_numbers = [int(e.strip()) for e in re.findall(r'^[0-9]+ | [0-9]+ | [0-9]+$', line)]
+        return (' ' + str(e) + ' ' for e in all_numbers)
+
+    def find_between(self, string, start, end):
+        substrings = []
+        start_index = string.find(start)
+        if start_index > -1:
+            start_offset = start_index + len(start)
+            end_index = string[start_offset:].find(end)
+            if end_index > -1:
+                end_index += start_offset
+                substrings.append(start + string[start_offset:end_index] + end)
+                end_offset = end_index + len(end)
+                return substrings + self.find_between(string[end_offset:], start, end)
+
+        return []
+
+    def clean_line(self, line):
+        line = self.remove_comment(line)
+        line = (line
+                .replace(',', ' , ')
+                .replace(';', ' ; ')
+                .replace('(', ' ( ')
+                .replace(')', ' ) ')
+                .replace('=', ' = ')
+                )
+        literals = self.find_between(line, start="${", end="}")
+        literals += self.find_between(line, start="'", end="'")
+        literals += self.find_numbers(line)
+        if literals:
+            line = str(' ' + str(line) + ' ')
+            return self.replace_all(line, literals).upper()
+        else:
+            return line.upper()
+
+    def replace_literal(self, m, replacements):
+        self.__words.append(m.group(0))
+        return replacements[re.escape(m.group(0))]
+
+    def replace_all(self, line, literals, token=' #WORD# '):
+        replacements = {re.escape(k): token for k in iter(literals)}
+        pattern = re.compile("|".join(replacements.keys()))
+        return pattern.sub(lambda m: self.replace_literal(m, replacements), line)
+
+    def clean_queries(self, queries):
+        self.__words = []
+        self.__comments = []
+        return [' '.join(map(self.clean_line, query)).split(';') for query in queries]
+
+    def get_words(self):
+        return self.__words
