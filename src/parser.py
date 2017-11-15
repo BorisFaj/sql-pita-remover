@@ -7,6 +7,7 @@ import re
 import os
 import json
 from operator import itemgetter
+from copy import copy
 
 
 class UnreferencedTableError(Exception):
@@ -22,8 +23,8 @@ class Parser:
         self.logger = logging.getLogger('hive_parser')
         self._config = self.load_json(os.path.join(conf_path, conf_file))
         self._conf_path = conf_path
-        #self.__mapping = self._load_mapping_files(os.path.join(conf_path, self._config['mapping_dir']))
-        self.__mapping = self.__init_debug_mapping()  # ToDo: utilizar los ficheros de mapping en lugar de esto
+        self.__mapping = self._load_mapping_files(os.path.join(conf_path, self._config['mapping_dir']))
+        #self.__mapping = self.__init_debug_mapping()  # ToDo: utilizar los ficheros de mapping en lugar de esto
         self.__queries_elements = []
         self.__reverse_tree = []
         self.__queries = {}
@@ -70,13 +71,9 @@ class Parser:
         grammar_file = ' '.join(f.readlines())
         self._terminals = [t.upper().strip().replace("'", "") for t in self.find_between(grammar_file, "'", "'")]
         if new_terminals:
-            #self._terminals += new_terminals
             new_tables, new_columns = zip(*[self.str_to__terminal(t) for t in new_terminals])
             tables = '\nTABLE_NAMES -> ' + '|'.join(new_tables)
             columns = '\nCOLUMN_NAMES ->' + '|'.join(new_columns)
-
-            self.logger.debug('Tablas nuevas: {}'.format(tables))
-            self.logger.debug('Columnas nuevas: {}'.format(columns))
 
             return nltk.CFG.fromstring(grammar_file + tables + columns)
 
@@ -87,78 +84,79 @@ class Parser:
     def __init_debug_mapping():
         """Me creo estos mappings durante el desarrollo para las pruebas."""
         t3_mapping = {
-            "old_name": "t3",
+            "old_name": "T3",
             "new_name": "nueva_t3",
             "fields": {
-                "a": "nuevo_a_t3",
-                "b": "nuevo_b_t3"
+                "A": "nuevo_a_t3",
+                "B": "nuevo_b_t3"
             }
         }
 
         t2_mapping = {
-            "old_name": "t2",
+            "old_name": "T2",
             "new_name": "nueva_t2",
             "fields": {
-                "a": "nuevo_a_t2",
-                "b": "nuevo_b_t2",
-                "p": "nuevo_p_t2",
-                "where_column": "nueva_where"
+                "A": "nuevo_a_t2",
+                "B": "nuevo_b_t2",
+                "C": "nuevo_c_t2",
+                "P": "nuevo_p_t2",
+                "WHERE_COLUMN": "nueva_where"
             }
         }
 
         t1_mapping = {
-            "old_name": "t1",
+            "old_name": "T1",
             "new_name": "nueva_t1",
             "fields": {
-                "a": "nuevo_a_t1",
-                "b": "nuevo_b_t1",
-                "c": "nuevo_c_t1",
-                "d": "nuevo_d_t1",
-                "e": "nuevo_e_t1",
-                "p": "nuevo_p_t1",
-                "where_column": "nueva_where"
+                "A": "nuevo_a_t1",
+                "B": "nuevo_b_t1",
+                "C": "nuevo_c_t1",
+                "D": "nuevo_d_t1",
+                "E": "nuevo_e_t1",
+                "P": "nuevo_p_t1",
+                "WHERE_COLUMN": "nueva_where"
             }
         }
 
         t4_mapping = {
-            "old_name": "t4",
+            "old_name": "T4",
             "new_name": "nueva_t4",
             "fields": {
-                "a": "nuevo_a_t4",
-                "b": "nuevo_b_t4",
-                "c": "nuevo_c_t4",
-                "d": "nuevo_d_t4",
-                "e": "nuevo_e_t4",
-                "f": "nuevo_f_t4",
-                "g": "nuevo_g_t4"
+                "A": "nuevo_a_t4",
+                "B": "nuevo_b_t4",
+                "C": "nuevo_c_t4",
+                "D": "nuevo_d_t4",
+                "E": "nuevo_e_t4",
+                "F": "nuevo_f_t4",
+                "G": "nuevo_g_t4"
             }
         }
 
         t5_mapping = {
-            "old_name": "t5",
+            "old_name": "T5",
             "new_name": "nueva_t5",
             "fields": {
-                "a": "nuevo_a_t5",
-                "b": "nuevo_b_t5",
-                "c": "nuevo_c_t5",
-                "d": "nuevo_d_t5",
-                "e": "nuevo_e_t5",
-                "f": "nuevo_f_t5",
-                "g": "nuevo_g_t5"
+                "A": "nuevo_a_t5",
+                "B": "nuevo_b_t5",
+                "C": "nuevo_c_t5",
+                "D": "nuevo_d_t5",
+                "E": "nuevo_e_t5",
+                "F": "nuevo_f_t5",
+                "G": "nuevo_g_t5"
             }
         }
 
         t6_mapping = {
-            "old_name": "t6",
+            "old_name": "T6",
             "new_name": "nueva_t6",
             "fields": {
-                "a": "nuevo_a_t6",
-                "b": "nuevo_b_t6"
+                "A": "nuevo_a_t6",
+                "B": "nuevo_b_t6"
             }
         }
 
-        mapping = {'t1': t1_mapping, 't2': t2_mapping, 't3': t3_mapping, 't5': t5_mapping,
-                   't6': t6_mapping, 't4': t4_mapping}
+        mapping = {'T1': t1_mapping, 'T2': t2_mapping, 'T3': t3_mapping, 'T5': t5_mapping,
+                   'T6': t6_mapping, 'T4': t4_mapping}
         mapping['tables'] = {mapping[table]['old_name']: mapping[table]['new_name'] for table in mapping.keys()}
         return mapping
 
@@ -239,7 +237,7 @@ class Parser:
         if not os.path.isdir(path):
             raise FileNotFoundError('No se encuentra la ruta especificada: {}'.format(path))
 
-        return {f: self.load_json(os.path.join(path, f)) for f in os.listdir(path)}
+        return {f.replace('.json', ''): self.load_json(os.path.join(path, f)) for f in os.listdir(path)}
 
     def parse_query(self, query, trace=0):
         """Parsea una query en texto plano para transformarla en una sentencia de la gramatica.
@@ -261,7 +259,6 @@ class Parser:
         sent = [chunk.upper() for chunk in re.sub(' +', ' ', sent).split(' ') if chunk]
         new_terminals = set(filter(lambda x: x not in self._terminals, sent))
         self.__grammar = self._read_grammar_(os.path.join(self._conf_path, self._config['grammar_file']), new_terminals)
-        self.logger.debug('Sent: {}'.format(sent))
         parser = nltk.ChartParser(self.__grammar, trace=trace)
 
         return parser.parse(sent)
@@ -321,20 +318,53 @@ class Parser:
             # Si es el primer nodo root encontrado
             skip_to = self.__skip_to_node__(skip_to, parent)
             # Se extrae el alias (sin AS) y se actualiza el diccionario
-            _table_name = parent[-1].leaves()[1]
+            _alias_node = parent[-1].leaves()
+            _table_name = _alias_node[0] if len(_alias_node) == 1 else _alias_node[1]  # Si no lleva 'AS' guarda el primero
             tables['alias'].setdefault(_table_name, {'subquery': 0})
             # Se mete a la cola de subqueries
             self.__queries_elements.append(tables['alias'][_table_name])
         elif parent.label() != 'TABLE_ALIAS':
             # Si es una referencia directa a una tabla
-            tables['names'] += [''.join(node.leaves())]
+            _table_name = ''.join(node.leaves())
+            if _table_name not in tables['names']:
+                tables['names'] += [_table_name]
             self.__reverse_tree.append((parent, i))
         elif parent.label() == 'TABLE_ALIAS' and tables['names']:
             # Si es una referencia a un alias y este no es de una subquery
             tables['alias'].setdefault(node.leaves()[0], tables['names'][-1])
+            self.logger.debug('Se mete nodo alias: {}'.format(parent))
             self.__reverse_tree.append((parent, i))
 
         return skip_to
+
+    def _merge_schema(self, node):
+        """Si el nodo es una referencia a una tabla y esta lleva referencia a su esquema, se fusiona el nombre de la
+        tabla y el esquema en un mismo nodo.
+        Esto se hace porque la gramatica no contempla la referencia al esquema para proporcionar mayor flexibilidad
+        en el preprocesamiento. De esta manera, en la query se admite cualquier nombre en tablas y columnas. Si
+        tuviera que diferenciar el esquema, tendria tambien que diferenciar en el preprocesamiento cuando se trata
+        de una clausula FROM.
+
+        Parameters
+        ----------
+        node: nltk.Tree
+            Nodo que se comprueba.
+        """
+        if node.label() != 'TABLE_REFERENCE':
+            return False
+
+        if len(node) < 3:
+            return False
+
+        if node[0].label() == 'TABLE_NAMES' and node[2].label() == 'TABLE_NAMES':
+            _schema = node[0].leaves()
+            table = copy(node[2])
+            node[0][0] = '.'.join(_schema + table.leaves())
+            node.remove(node[1])  # el punto
+            node.remove(table)
+            return True
+
+        return False
 
     def iter_table_node(self, tree, root, i, skip_to=None):
         """Itera sobre los nodos de una referencia a tabla y los va procesando.
@@ -359,6 +389,7 @@ class Parser:
         directamente a ese nodo y no tenga que volver a procesarlo. Si el nodo contiene subqueries, se deuvelve
         la raiz de la primera subquery.
         """
+        self._merge_schema(tree)
         skip_to = [self._process_table_name(tree, node, root, i, skip_to) for node in self.get_subtrees(tree)]
 
         return skip_to[0] if skip_to else None
@@ -411,6 +442,21 @@ class Parser:
 
         return columns
 
+    def rename_non_select(self, node):
+        """Renombra las referencias a tablas en nodos distintos a select. Como no tienen dependencias de
+        subqueries ni alias, se pueden renombrar directamente.
+
+        Parameters
+        ----------
+        node: nltk.Tree
+            Nodo que se va a renombrar.
+        """
+        table_node = [child for child in self.get_subtrees(node) if child.label() == 'TABLE_REFERENCE'][0]
+        self._merge_schema(table_node)
+        table_name = table_node[0][0]
+        if table_name in self.__mapping:
+            table_node[0][0] = self.__mapping[table_name]['new_name']
+
     def _process_node(self, node, parent, root, i):
         """Realiza el procesamiento de un nodo. Extrae los nombres de columnas y tablas y sus alias correspondientes.
         Si un alias hace referencia a un subquery, se almacena el indice de la subquery. Al mismo tiempo se van
@@ -445,6 +491,9 @@ class Parser:
             # Si es un nodo tabla, se explora el trozo de query y se obtiene el nodo de la primera subquery que
             # contiene, en caso de que contenga alguna
             next_node = self.iter_table_node(node, root, i)
+        elif node.label() in ['INSERT_EXPRESSION', 'CREATE_EXPRESSION']:
+            # Si es la parte del insert o create table, se renombra directamente
+            self.rename_non_select(node)
 
         if not node.label() == 'COLUMN_EXPRESSION':
             # Si el nodo es de columnas, ya esta procesado y no es necesario profundizar
