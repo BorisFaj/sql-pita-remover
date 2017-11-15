@@ -29,7 +29,7 @@ def write_json(path, d):
         Diccionario que se va a persistir.
 
     """
-    file_path = os.path.join(path, str(d['old_name']) + '.json')
+    file_path = os.path.join(path, str(d['old_name']).upper() + '.json')
     with open(file_path, 'w') as fp:
         json.dump(d, fp, indent=4)
 
@@ -65,7 +65,7 @@ def _generate_json(e, all_json):
     """
     try:
         table = all_json.get(e['Tabla Origen'], __init_dict__(e))
-        table['fields'].setdefault(e['columnaLegacy'], e['Code'])
+        table['fields'].setdefault(e['columnaLegacy'].upper(), e['Code'])
 
         all_json[e['Tabla Origen']] = table
 
@@ -135,6 +135,7 @@ def process_all(excel_path, sep, conf_path):
 
     # Persistir los json
     for conf_file in all_json.keys():
+        all_json[conf_file]['fields'].setdefault('*', '*')
         write_json(conf_path, all_json[conf_file])
 
     logging.info('Procesamiento finalizado, los json con los mapeos estan guardados en {}'.format(conf_path))
