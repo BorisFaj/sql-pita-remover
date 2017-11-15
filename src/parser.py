@@ -6,6 +6,7 @@ import nltk
 import re
 import os
 import json
+import sqlparse
 from operator import itemgetter
 from copy import copy
 
@@ -940,7 +941,7 @@ class Parser:
         literals += self.find_numbers(line)
         if literals:
             line = str(' ' + str(line) + ' ')
-            return self.replace_all(line, literals).upper()
+            return self.tokenize_literals(line, literals).upper()
         else:
             return line.upper()
 
@@ -948,10 +949,15 @@ class Parser:
         self.__words.append(m.group(0))
         return replacements[re.escape(m.group(0))]
 
-    def replace_all(self, line, literals, token=' #WORD# '):
+    def tokenize_literals(self, line, literals, token=' #WORD# '):
         replacements = {re.escape(k): token for k in iter(literals)}
         pattern = re.compile("|".join(replacements.keys()))
         return pattern.sub(lambda m: self.replace_literal(m, replacements), line)
+
+    def untokenize(self, line, token='#WORD#'):
+        replacements = {re.escape(token): k for k in self.get_words()}
+        pattern = re.compile("|".join(replacements.keys()))
+        return pattern.sub(lambda m: replacements[re.escape(m.group(0))], line)
 
     def clean_queries(self, queries):
         self.__words = []
@@ -960,3 +966,18 @@ class Parser:
 
     def get_words(self):
         return self.__words
+
+    def rebuild_query(self, query, pretty=True):
+        query = (self.untokenize(query)
+                 .replace(' , ', ', ')
+                 .replace(' ; ', ';')
+                 .replace(' ( ', ' (')
+                 .replace(' ) ', ') ')
+                 #.replace(' = ', '=')
+                 .replace(' . ', '.')
+                 )
+
+        if pretty:
+            return sqlparse.format(query, reindent=True, keyword_case='upper')
+        else:
+            return query
