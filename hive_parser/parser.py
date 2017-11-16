@@ -230,7 +230,7 @@ class Parser:
             return nltk.CFG.fromstring(grammar_file)
 
     @staticmethod
-    def __skip_to_node__(target, current):
+    def __skip_to_node(target, current):
         """Devuelve el nodo target si este no es null, en otro caso devuelve el current.
 
         Parameters
@@ -376,24 +376,24 @@ class Parser:
             Indice de la query actual.
         skip_to: nltk.Tree
             Toma el valor del ultimo nodo procesado para que la funcion que llama a get_table_name pueda saltar
-        directamente a ese nodo y no tenga que volver a procesarlo. Si el nodo contiene subqueries, se deuvelve
+            directamente a ese nodo y no tenga que volver a procesarlo. Si el nodo contiene subqueries, se deuvelve
         la raiz de la primera subquery.
 
         Returns
         -------
         nltk.Tree
             Toma el valor del ultimo nodo procesado para que la funcion que llama a get_table_name pueda saltar
-        directamente a ese nodo y no tenga que volver a procesarlo. Si el nodo contiene subqueries, se deuvelve
-        la raiz de la primera subquery.
+            directamente a ese nodo y no tenga que volver a procesarlo. Si el nodo contiene subqueries, se deuvelve
+            la raiz de la primera subquery.
         """
         tables = self.__queries[i]['tables']
         if node.label() not in ['TABLE_NAMES', root]:
             # Si no es un nodo de tabla, sigue iterando
             _skip = self.__iter_table_node(node, root, i, skip_to)
-            skip_to = self.__skip_to_node__(skip_to, _skip)
+            skip_to = self.__skip_to_node(skip_to, _skip)
         elif node.label() == root:
             # Si es el primer nodo root encontrado
-            skip_to = self.__skip_to_node__(skip_to, parent)
+            skip_to = self.__skip_to_node(skip_to, parent)
             # Se extrae el alias (sin AS) y se actualiza el diccionario
             _alias_node = parent[-1].leaves()
             _table_name = _alias_node[0] if len(_alias_node) == 1 else _alias_node[1]  # Si no lleva 'AS' guarda el primero
@@ -458,15 +458,15 @@ class Parser:
             Indice de la query actual.
         skip_to: nltk.Tree
             Toma el valor del ultimo nodo procesado para que la funcion que llama a get_table_name pueda saltar
-        directamente a ese nodo y no tenga que volver a procesarlo. Si el nodo contiene subqueries, se deuvelve
-        la raiz de la primera subquery.
+            directamente a ese nodo y no tenga que volver a procesarlo. Si el nodo contiene subqueries, se deuvelve
+            la raiz de la primera subquery.
 
         Returns
         -------
         nltk.Tree
             Toma el valor del ultimo nodo procesado para que la funcion que llama a get_table_name pueda saltar
-        directamente a ese nodo y no tenga que volver a procesarlo. Si el nodo contiene subqueries, se deuvelve
-        la raiz de la primera subquery.
+            directamente a ese nodo y no tenga que volver a procesarlo. Si el nodo contiene subqueries, se deuvelve
+            la raiz de la primera subquery.
         """
         self.__merge_schema(tree)
         skip_to = [self.__process_table_name(tree, node, root, i, skip_to) for node in self.get_subtrees(tree)]
@@ -576,7 +576,7 @@ class Parser:
 
         if not node.label() == 'COLUMN_EXPRESSION':
             # Si el nodo es de columnas, ya esta procesado y no es necesario profundizar
-            self._process_tree(self.__skip_to_node__(next_node, node), i, root)
+            self._process_tree(self.__skip_to_node(next_node, node), i, root)
 
     def _process_tree(self, tree, i=0, root='SELECT_SENTENCE'):
         """Recorre el AST y va actualizando el diccionario de queries (self.__queries).
