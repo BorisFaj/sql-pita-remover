@@ -19,33 +19,66 @@ class UnreferencedTableError(Exception):
 
 
 class Parser:
-    def __init__(self, conf_path, conf_file, log_level=logging.INFO):
+    def __init__(self, conf, log_level=logging.INFO):
         logging.basicConfig(level=log_level, format='%(levelname)s %(name)s %(asctime)s %(message)s')
         self.logger = logging.getLogger('hive_parser')
-        self._config = self.load_json(os.path.join(conf_path, conf_file))
-        self._conf_path = conf_path
-        self.__mapping = self._load_mapping_files(os.path.join(conf_path, self._config['mapping_dir']))
-        #self.__mapping = self.__init_debug_mapping()  # ToDo: utilizar los ficheros de mapping en lugar de esto
+        self._config = self.load_json(conf)
+        self.__mapping = self._load_mapping_files(os.path.join(self._config['mapping_dir']))
         self.__queries_elements = []
         self.__reverse_tree = []
         self.__queries = {}
         self.__comments = []
         self.__words = []
         self._terminals = None
-        self._queries = self.clean_queries(self.load_queries())
-        self.__grammar = self._read_grammar_(os.path.join(conf_path, self._config['grammar_file']))
+        self.tree = None
+        #self._queries = self.clean_queries(self.load_queries())
+        self.__grammar = self._read_grammar_(self._config['grammar_file'])
+
 
     def get_grammar(self):
         return self.__grammar
 
+    def get_words(self):
+        return self.__words
+
+    def get_comments(self):
+        return self.__comments
+
     @staticmethod
     def read_query(query):
         with open(query, 'r') as file:
-            return [line.replace('\n', ' ').replace('\t', ' ') for line in file.readlines()]
+            yield [line.replace('\n', ' ').replace('\t', ' ') for line in file.readlines()]
 
     def load_queries(self):
-        return (self.read_query(os.path.join(self._config['input_path'], query))
-                for query in os.listdir(self._config['input_path']))
+        queries = {query: self.read_query(os.path.join(self._config['input_path'], query))
+                   for query in os.listdir(self._config['input_path'])}
+
+        return queries
+
+    def save_renamed(self, queries):
+        self.__comments = []
+        compacted_queries = self._process_file(queries)
+
+        [[self.parse_and_save(query, file) for query in queries if query] for file, queries in compacted_queries]
+
+    def _process_file(self, queries):
+        for file in queries.keys():
+            yield file, ' '.join(map(self.remove_comment, next(line for line in queries[file]))).split(';')
+
+    def parse_and_save(self, query, file_name):
+        self.logger.info(query)
+        self.__queries_elements = []
+        self.__reverse_tree = []
+        self.__queries = {}
+        parsed = self.parse_query(query)
+        _out_path = os.path.join(self._config['output_path'], file_name)
+        self.save_query(parsed.rename_tree().rebuild_query(), _out_path)
+
+    @staticmethod
+    def save_query(query, file):
+        with open(file, 'a') as f:
+            f.writelines(query + '\n;\n\n')
+
 
     @staticmethod
     def str_to__terminal(s):
@@ -80,86 +113,6 @@ class Parser:
 
         else:
             return nltk.CFG.fromstring(grammar_file)
-
-    @staticmethod
-    def __init_debug_mapping():
-        """Me creo estos mappings durante el desarrollo para las pruebas."""
-        t3_mapping = {
-            "old_name": "T3",
-            "new_name": "nueva_t3",
-            "fields": {
-                "A": "nuevo_a_t3",
-                "B": "nuevo_b_t3"
-            }
-        }
-
-        t2_mapping = {
-            "old_name": "T2",
-            "new_name": "nueva_t2",
-            "fields": {
-                "A": "nuevo_a_t2",
-                "B": "nuevo_b_t2",
-                "C": "nuevo_c_t2",
-                "P": "nuevo_p_t2",
-                "WHERE_COLUMN": "nueva_where"
-            }
-        }
-
-        t1_mapping = {
-            "old_name": "T1",
-            "new_name": "nueva_t1",
-            "fields": {
-                "A": "nuevo_a_t1",
-                "B": "nuevo_b_t1",
-                "C": "nuevo_c_t1",
-                "D": "nuevo_d_t1",
-                "E": "nuevo_e_t1",
-                "P": "nuevo_p_t1",
-                "WHERE_COLUMN": "nueva_where"
-            }
-        }
-
-        t4_mapping = {
-            "old_name": "T4",
-            "new_name": "nueva_t4",
-            "fields": {
-                "A": "nuevo_a_t4",
-                "B": "nuevo_b_t4",
-                "C": "nuevo_c_t4",
-                "D": "nuevo_d_t4",
-                "E": "nuevo_e_t4",
-                "F": "nuevo_f_t4",
-                "G": "nuevo_g_t4"
-            }
-        }
-
-        t5_mapping = {
-            "old_name": "T5",
-            "new_name": "nueva_t5",
-            "fields": {
-                "A": "nuevo_a_t5",
-                "B": "nuevo_b_t5",
-                "C": "nuevo_c_t5",
-                "D": "nuevo_d_t5",
-                "E": "nuevo_e_t5",
-                "F": "nuevo_f_t5",
-                "G": "nuevo_g_t5"
-            }
-        }
-
-        t6_mapping = {
-            "old_name": "T6",
-            "new_name": "nueva_t6",
-            "fields": {
-                "A": "nuevo_a_t6",
-                "B": "nuevo_b_t6"
-            }
-        }
-
-        mapping = {'T1': t1_mapping, 'T2': t2_mapping, 'T3': t3_mapping, 'T5': t5_mapping,
-                   'T6': t6_mapping, 'T4': t4_mapping}
-        mapping['tables'] = {mapping[table]['old_name']: mapping[table]['new_name'] for table in mapping.keys()}
-        return mapping
 
     @staticmethod
     def __skip_to_node__(target, current):
@@ -256,13 +209,16 @@ class Parser:
         generator(nltk.tree.Tree)
             Devuelve los arboles de sintaxis que representan la query parseada.
         """
-        sent = query.replace(',', ' , ').replace('.', ' . ').replace('(', ' ( ').replace(')', ' ) ')
+        self.__words = []
+        clean_query = self.clean_line(query)
+        sent = clean_query.replace(',', ' , ').replace('.', ' . ').replace('(', ' ( ').replace(')', ' ) ')
         sent = [chunk.upper() for chunk in re.sub(' +', ' ', sent).split(' ') if chunk]
         new_terminals = set(filter(lambda x: x not in self._terminals, sent))
-        self.__grammar = self._read_grammar_(os.path.join(self._conf_path, self._config['grammar_file']), new_terminals)
+        self.__grammar = self._read_grammar_(self._config['grammar_file'], new_terminals)
         parser = nltk.ChartParser(self.__grammar, trace=trace)
 
-        return parser.parse(sent)
+        self.tree = next(parser.parse(sent), None)
+        return self
 
     def _update_subqueries(self, i):
         """Cuando se lee un nodo que representa una subquery, este se almacena en una cola a la espera de saber
@@ -895,8 +851,11 @@ class Parser:
         [self._process_names(node, child, i) for child in self.get_subtrees(node)]
 
     def rename_tree(self):
-        """Lleva a cabo el renombramiento del AST anteriormente procesado."""
+        """Procesa el AST y lleva a cabo el renombramiento conforme a los ficheros de mapping."""
+        self.process_tree(self.tree)
         [self.rename_nodes(e[0], e[1]) for e in self.get_reverse_tree()]
+
+        return self
 
     def remove_comment(self, line):
         m = re.search(r'--.*', line)
@@ -928,7 +887,9 @@ class Parser:
         return []
 
     def clean_line(self, line):
-        line = self.remove_comment(line)
+        if not line:
+            return line
+
         line = (line
                 .replace(',', ' , ')
                 .replace(';', ' ; ')
@@ -955,19 +916,18 @@ class Parser:
         return pattern.sub(lambda m: self.replace_literal(m, replacements), line)
 
     def untokenize(self, line, token='#WORD#'):
-        replacements = {re.escape(token): k for k in self.get_words()}
+        if not self.__words:
+            return line
+
+        replacements = {re.escape(token): k for k in self.__words}
         pattern = re.compile("|".join(replacements.keys()))
         return pattern.sub(lambda m: replacements[re.escape(m.group(0))], line)
-
-    def clean_queries(self, queries):
-        self.__words = []
-        self.__comments = []
-        return [' '.join(map(self.clean_line, query)).split(';') for query in queries]
 
     def get_words(self):
         return self.__words
 
-    def rebuild_query(self, query, pretty=True):
+    def rebuild_query(self, pretty=True):
+        query = ' '.join(self.tree.leaves())
         query = (self.untokenize(query)
                  .replace(' , ', ', ')
                  .replace(' ; ', ';')
@@ -978,6 +938,6 @@ class Parser:
                  )
 
         if pretty:
-            return sqlparse.format(query, reindent=True, keyword_case='upper')
+            return '\n'.join(self.__comments) + '\n' + sqlparse.format(query, reindent=True, keyword_case='upper')
         else:
             return query
