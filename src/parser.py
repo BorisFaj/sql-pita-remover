@@ -21,7 +21,7 @@ class UnreferencedTableError(Exception):
 class Parser:
     def __init__(self, conf, log_level=logging.INFO):
         logging.basicConfig(level=log_level, format='%(levelname)s %(name)s %(asctime)s %(message)s')
-        self.logger = logging.getLogger('hive_parser')
+        self._logger = logging.getLogger('hive_parser')
         self._config = self.load_json(conf)
         self.__mapping = self._load_mapping_files(os.path.join(self._config['mapping_dir']))
         self.__queries_elements = []
@@ -31,81 +31,194 @@ class Parser:
         self.__words = []
         self._terminals = None
         self.tree = None
-        #self._queries = self.clean_queries(self.load_queries())
         self.__grammar = self._read_grammar_(self._config['grammar_file'])
 
-
     def get_grammar(self):
+        """Devuelve la gramatica utilizada."""
         return self.__grammar
 
     def get_words(self):
+        """Devuelve las palabras que se han eliminado de la query: variables hive, literales y constantes."""
         return self.__words
 
     def get_comments(self):
+        """Devuelve los comentarios que se han eliminado de la query."""
         return self.__comments
 
     @staticmethod
-    def read_query(query):
-        with open(query, 'r') as file:
+    def _read_query_file(path):
+        """Lee una query en un fichero.
+
+        Parameters
+        ----------
+        path: str
+            Ruta del fichero.
+
+        Returns
+        -------
+        generator
+            Devuelve cada vez una linea del fichero.
+        """
+        with open(path, 'r') as file:
             yield [line.replace('\n', ' ').replace('\t', ' ') for line in file.readlines()]
 
-    def load_queries(self):
-        queries = {query: self.read_query(os.path.join(self._config['input_path'], query))
-                   for query in os.listdir(self._config['input_path'])}
+    def load_queries(self, path=None):
+        """Lee las queries situadas en la ruta especificada. Si no se especifica ruta, se busca en el fichero de
+        configuracion.
 
-        return queries
+        Returns
+        -------
+        path: str
+            Ruta al directorio de las queries. Si no se especifica, se lee del fichero de configuracion.
 
-    def save_renamed(self, queries):
+        Returns
+        -------
+        dict
+            Diccionario cuya clave es el nombre del fichero (solo el nombre, no la ruta completa) y el valor es las
+            queries almacenadas en este.
+        """
+        if not path:
+            path = self._config.get('input_path', None)
+
+        if not os.path.exists(path):
+            raise NotADirectoryError("La carpeta especificada para leer los ficheros de queries '{}' no existe. "
+                                     "Por favor, comprueba que existe y que tiene los permisos adecuados".format(path))
+
+        return {file: self._read_query_file(os.path.join(path, file)) for file in os.listdir(path)}
+
+    def save_renamed(self, queries, path=None):
+        """Renombra las queries de acuerdo a los ficheros de mapping y las guarda en la ruta especificada. El nombre de
+        cada fichero es el mismo que en la entrada.
+
+        Parameters
+        ----------
+        queries: dict
+            Diccionario generado por la funcion load_queries. La clave es el nombre del fichero y el valor es un
+            generador de las queries almacenadas en este.
+        path: str
+            Ruta al directorio donde se van a almacenar las queries renombradas. Si no se especifica, se lee del fichero
+            de configuracion.
+        """
+        if not path:
+            path = self._config['output_path']
+
+        if not os.path.exists(path):
+            raise NotADirectoryError("La carpeta de salida para guardar los ficheros renombrados '{}' no existe. "
+                                     "Por favor, comprueba que existe y que tiene los permisos adecuados".format(path))
+
         self.__comments = []
-        compacted_queries = self._process_file(queries)
+        compacted_queries = self.__process_file(queries)
 
-        [[self.parse_and_save(query, file) for query in queries if query] for file, queries in compacted_queries]
+        [[self.__parse_and_save(query, file, path) for query in queries if query] for file, queries in compacted_queries]
+        self._logger.info('Todas las queries han sido correctamente renombradas y almacenadas en la ruta {}'.format(path))
 
-    def _process_file(self, queries):
+    def __process_file(self, queries):
+        """Preprocesa un fichero de query. Se eliminan los comentarios, se juntan todas las lineas en un solo string
+        y se separan las queries por cada punto y coma.
+
+        Parameters
+        ----------
+        queries: dict
+            Diccionario generado por la funcion load_queries. La clave es el nombre del fichero y el valor es un
+            generador de las queries almacenadas en este.
+
+        Returns
+        -------
+        generator
+            Devuelve cada vez uno de los ficheros preprocesados.
+        """
         for file in queries.keys():
-            yield file, ' '.join(map(self.remove_comment, next(line for line in queries[file]))).split(';')
+            yield file, ' '.join(map(self._remove_comment, next(line for line in queries[file]))).split(';')
 
-    def parse_and_save(self, query, file_name):
-        self.logger.info(query)
+    def __parse_and_save(self, query, file_name, path):
+        """Parsea y almacena una query. La query que entra viene de iterar sobre un generador, el proposito de esta
+        funcion es poder realizar el procesamiento sin tener que almacenar todas las queries en memoria en ningun
+        momento.
+
+        Parameters
+        ----------
+        query: str
+            Query con los comentarios eliminados.
+        file_name: str
+            Nombre del fichero de salida.
+        path: str
+            Ruta de los ficheros de salida.
+
+        Returns
+        -------
+
+        """
+        self._logger.debug(query)
         self.__queries_elements = []
         self.__reverse_tree = []
         self.__queries = {}
         parsed = self.parse_query(query)
-        _out_path = os.path.join(self._config['output_path'], file_name)
+        _out_path = os.path.join(path, file_name)
         self.save_query(parsed.rename_tree().rebuild_query(), _out_path)
 
     @staticmethod
     def save_query(query, file):
+        """Agrega la query al fichero de texto especificado.
+
+        Parameters
+        ----------
+        query: str
+            Query.
+        file: str
+            Fichero de destino.
+        """
         with open(file, 'a') as f:
             f.writelines(query + '\n;\n\n')
 
-
     @staticmethod
-    def str_to__terminal(s):
+    def __str_to_terminals(s):
+        """Pretende separar un terminal extraido de la query en la tupla (tabla, columna). En la practica, sin una
+        estructura gramatical a priori, es imposible saber si la entrada se refiere a (tabla, columna) o (esquema, tabla).
+        De la misma forma, si la cadena no lleva punto, es imposible saber a priori si se refiere a un esquema, una tabla,
+        o una columna.
+
+        Parameters
+        ----------
+        s: str
+            Terminal a separar.
+
+        Returns
+        -------
+        str, str
+            tabla, columna.
+        """
         if '.' in s:
             return ["'" + t + "'" for t in s.split('.')]
         else:
             s = "'" + s + "'"
             return s, s
 
-    def _read_grammar_(self, path, new_terminals=None):
-        """Lee las reglas de produccion de la gramatica contenidas en el fichero indicado.
+    def _read_grammar_(self, path=None, new_terminals=None):
+        """Lee las reglas de produccion de la gramatica contenidas en el fichero indicado. Si se especifica una lista
+        de nuevos simbolos terminales, esta se agrega a las reglas de produccion que contienen los nombres de tablas y
+        columnas.
 
         Parameters
         ----------
         path: str
-            Ruta al fichero que contiene las reglas de produccion de la gramatica.
+            Ruta al fichero que contiene las reglas de produccion de la gramatica. Si no se especifica esta variable,
+            la lee del fichero de configuracion.
+        new_terminals: list(str)
+            Lista de nuevos simbolos terminales, extraidos de la query.
 
         Returns
         -------
         nltk.grammar.CFG
             Objeto nltk que contiene la gramatica libre de contexto leida.
         """
+        if not path:
+            path = self._config['grammar_file']
+
         f = open(path, 'r')
         grammar_file = ' '.join(f.readlines())
-        self._terminals = [t.upper().strip().replace("'", "") for t in self.find_between(grammar_file, "'", "'")]
+        self._terminals = [t.upper().strip().replace("'", "") for t in self._find_between(grammar_file, "'", "'")]
         if new_terminals:
-            new_tables, new_columns = zip(*[self.str_to__terminal(t) for t in new_terminals])
+            new_tables, new_columns = zip(*[self.__str_to_terminals(t) for t in new_terminals])
             tables = '\nTABLE_NAMES -> ' + '|'.join(new_tables)
             columns = '\nCOLUMN_NAMES ->' + '|'.join(new_columns)
 
@@ -170,7 +283,7 @@ class Parser:
             Diccionario que representa el json especificado.
         """
         if not os.path.exists(path):
-            raise FileNotFoundError('No se encuentra el fichero especificado: {}'.format(path))
+            raise FileNotFoundError('No se encuentra el fichero json especificado: {}'.format(path))
 
         js = open(path)
         return json.load(js)
@@ -195,22 +308,25 @@ class Parser:
 
     def parse_query(self, query, trace=0):
         """Parsea una query en texto plano para transformarla en una sentencia de la gramatica.
-            1. Se ponen espacio a cada lado de los signos de puntuacion, parentesis, etc.
-            2. Si quedan varios espacios seguidos, se simplifican a un espacio.
-            3. Se separan las palabras para convertirlas elementos de una lista.
+            1. Se preprocesa la query: se cambian las variables hive, literales y constantes por el simbolo #WORD#
+            2. Se ponen espacio a cada lado de los signos de puntuacion, parentesis, etc.
+            3. Si quedan varios espacios seguidos, se simplifican a un espacio.
+            4. Se tokenizan las palabras para convertirlas elementos de una lista.
 
         Parameters
         ----------
         query: str
             Query que se va a transformar.
+        trace: int
+            Define el nivel de traza que genera el objeto nltk.ChartParser. Si es 0 no genera traza.
 
         Returns
         -------
-        generator(nltk.tree.Tree)
-            Devuelve los arboles de sintaxis que representan la query parseada.
+        Parser
+            Devuelve un objeto parser que contiene el arbol generado en la variable Parser.tree.
         """
         self.__words = []
-        clean_query = self.clean_line(query)
+        clean_query = self._clean_line(query)
         sent = clean_query.replace(',', ' , ').replace('.', ' . ').replace('(', ' ( ').replace(')', ' ) ')
         sent = [chunk.upper() for chunk in re.sub(' +', ' ', sent).split(' ') if chunk]
         new_terminals = set(filter(lambda x: x not in self._terminals, sent))
@@ -220,7 +336,7 @@ class Parser:
         self.tree = next(parser.parse(sent), None)
         return self
 
-    def _update_subqueries(self, i):
+    def __update_subqueries(self, i):
         """Cuando se lee un nodo que representa una subquery, este se almacena en una cola a la espera de saber
         el indice de esa subquery. Cuando la siguiente subquery empieza a procesarse, coge el ultimo elemento de la
         cola y le asigna su indice.
@@ -233,13 +349,13 @@ class Parser:
         # cuando se procesa la query raiz de todas, no habra subqueries
         # tampoco cuando sea la segunda parte de un union
         if not len(self.__queries_elements):
-            self.logger.debug('No hay subqueries para asignar la numero {}'.format(i))
+            self._logger.debug('No hay subqueries para asignar la numero {}'.format(i))
             return
 
         _node = self.__queries_elements.pop()
         _node.update({'subquery': i})
 
-    def _process_table_name(self, parent, node, root, i, skip_to):
+    def __process_table_name(self, parent, node, root, i, skip_to):
         """Extrae los nombres de las tablas involucradas en este nivel de la query asi como sus alias a partir de un
         nodo TABLE_EXPRESSION. Las posibles subqueries no se procesan todavia, quedan a la espera de que se itere sobre
         ellas.
@@ -269,7 +385,7 @@ class Parser:
         tables = self.__queries[i]['tables']
         if node.label() not in ['TABLE_NAMES', root]:
             # Si no es un nodo de tabla, sigue iterando
-            _skip = self.iter_table_node(node, root, i, skip_to)
+            _skip = self.__iter_table_node(node, root, i, skip_to)
             skip_to = self.__skip_to_node__(skip_to, _skip)
         elif node.label() == root:
             # Si es el primer nodo root encontrado
@@ -289,12 +405,13 @@ class Parser:
         elif parent.label() == 'TABLE_ALIAS' and tables['names']:
             # Si es una referencia a un alias y este no es de una subquery
             tables['alias'].setdefault(node.leaves()[0], tables['names'][-1])
-            self.logger.debug('Se mete nodo alias: {}'.format(parent))
+            self._logger.debug('Se mete nodo alias: {}'.format(parent))
             self.__reverse_tree.append((parent, i))
 
         return skip_to
 
-    def _merge_schema(self, node):
+    @staticmethod
+    def __merge_schema(node):
         """Si el nodo es una referencia a una tabla y esta lleva referencia a su esquema, se fusiona el nombre de la
         tabla y el esquema en un mismo nodo.
         Esto se hace porque la gramatica no contempla la referencia al esquema para proporcionar mayor flexibilidad
@@ -310,6 +427,7 @@ class Parser:
         if node.label() != 'TABLE_REFERENCE':
             return False
 
+        # Los hijos deberian ser: TABLE_NAMES POINT TABLE_NAMES
         if len(node) < 3:
             return False
 
@@ -323,7 +441,7 @@ class Parser:
 
         return False
 
-    def iter_table_node(self, tree, root, i, skip_to=None):
+    def __iter_table_node(self, tree, root, i, skip_to=None):
         """Itera sobre los nodos de una referencia a tabla y los va procesando.
 
         Parameters
@@ -346,12 +464,12 @@ class Parser:
         directamente a ese nodo y no tenga que volver a procesarlo. Si el nodo contiene subqueries, se deuvelve
         la raiz de la primera subquery.
         """
-        self._merge_schema(tree)
-        skip_to = [self._process_table_name(tree, node, root, i, skip_to) for node in self.get_subtrees(tree)]
+        self.__merge_schema(tree)
+        skip_to = [self.__process_table_name(tree, node, root, i, skip_to) for node in self.get_subtrees(tree)]
 
         return skip_to[0] if skip_to else None
 
-    def _process_column_node(self, parent, node, columns):
+    def __process_column_node(self, parent, node, columns):
         """Extrae los nombres de las columnas involucradas en los nodos que se procesan.
 
         Parameters
@@ -370,7 +488,7 @@ class Parser:
         """
         if node.label() != 'COLUMN_NAMES':
             # Si no es un nodo de columna, sigue iterando
-            self.iter_column_node(node, columns)
+            self.__iter_column_node(node, columns)
         elif parent.label() != 'COLUMN_ALIAS':
             # Si es una referencia directa a una columna
             columns['names'] += [''.join(parent.leaves()).replace('DISTINCT', '')]
@@ -380,7 +498,7 @@ class Parser:
 
         return columns
 
-    def iter_column_node(self, tree, columns):
+    def __iter_column_node(self, tree, columns):
         """Itera sobre los nodos que hacen referencia a columnas y los va procesando.
 
         Parameters
@@ -395,11 +513,11 @@ class Parser:
         list(str)
             Lista actualizada de columnas.
         """
-        columns = [self._process_column_node(tree, node, columns) for node in self.get_subtrees(tree)]
+        columns = [self.__process_column_node(tree, node, columns) for node in self.get_subtrees(tree)]
 
         return columns
 
-    def rename_non_select(self, node):
+    def __rename_non_select(self, node):
         """Renombra las referencias a tablas en nodos distintos a select. Como no tienen dependencias de
         subqueries ni alias, se pueden renombrar directamente.
 
@@ -409,12 +527,12 @@ class Parser:
             Nodo que se va a renombrar.
         """
         table_node = [child for child in self.get_subtrees(node) if child.label() == 'TABLE_REFERENCE'][0]
-        self._merge_schema(table_node)
+        self.__merge_schema(table_node)
         table_name = table_node[0][0]
         if table_name in self.__mapping:
             table_node[0][0] = self.__mapping[table_name]['new_name']
 
-    def _process_node(self, node, parent, root, i):
+    def __process_node(self, node, parent, root, i):
         """Realiza el procesamiento de un nodo. Extrae los nombres de columnas y tablas y sus alias correspondientes.
         Si un alias hace referencia a un subquery, se almacena el indice de la subquery. Al mismo tiempo se van
         insertando los nodos procesados que contienen nombres de tablas o columnas en una lista (self.__reverse_tree).
@@ -435,28 +553,28 @@ class Parser:
             # Si es el nodo raiz, actualiza indices de queries y subqueries
             self.__queries['max'] += 1
             i = self.__queries['max']
-            self._update_subqueries(i)
+            self.__update_subqueries(i)
         elif node.label() == 'COLUMN_EXPRESSION':
             # Si es un nodo columna, se mete a la lista de procesados y se explora el trozo de query
             self.__reverse_tree.append((node, i))
-            self.iter_column_node(node, self.__queries[i]['columns'])
+            self.__iter_column_node(node, self.__queries[i]['columns'])
         elif parent.label() == 'FROM_EXPRESSION' and node.label() != 'TABLE_EXPRESSION':
             # Si es un nodo from, se mete a la lista de procesados y se explora el trozo de query
             self.__reverse_tree.append((node, i))
-            self.iter_column_node(node, self.__queries[i]['columns'])
+            self.__iter_column_node(node, self.__queries[i]['columns'])
         elif parent.label() == 'TABLE_EXPRESSION' and node.label() != 'TABLE_EXPRESSION':
             # Si es un nodo tabla, se explora el trozo de query y se obtiene el nodo de la primera subquery que
             # contiene, en caso de que contenga alguna
-            next_node = self.iter_table_node(node, root, i)
+            next_node = self.__iter_table_node(node, root, i)
         elif node.label() in ['INSERT_EXPRESSION', 'CREATE_EXPRESSION']:
             # Si es la parte del insert o create table, se renombra directamente
-            self.rename_non_select(node)
+            self.__rename_non_select(node)
 
         if not node.label() == 'COLUMN_EXPRESSION':
             # Si el nodo es de columnas, ya esta procesado y no es necesario profundizar
-            self.process_tree(self.__skip_to_node__(next_node, node), i, root)
+            self._process_tree(self.__skip_to_node__(next_node, node), i, root)
 
-    def process_tree(self, tree, i=0, root='SELECT_SENTENCE'):
+    def _process_tree(self, tree, i=0, root='SELECT_SENTENCE'):
         """Recorre el AST y va actualizando el diccionario de queries (self.__queries).
 
         Parameters
@@ -469,9 +587,9 @@ class Parser:
             Etiqueta del nodo raiz de una consulta select.
         """
         self.__queries.update(self._init_query(i + 1))
-        [self._process_node(node, tree, root, i) for node in self.get_subtrees(tree)]
+        [self.__process_node(node, tree, root, i) for node in self.get_subtrees(tree)]
 
-    def get_reverse_tree(self):
+    def _get_reverse_tree(self):
         """Devuelve la lista de nodos extraidos en la funcion get_nodes."""
         if not self.__reverse_tree:
             raise AssertionError('La query todavia no ha sido procesada. Por favor, ejecuta la funcion process_tree()'
@@ -498,6 +616,9 @@ class Parser:
         Boolean
             True si es un alias, False en caso contrario.
         """
+        if not self.__queries:
+            raise LookupError('El arbol no ha sido procesado todavia. Por favor ejecuta la funcion rename_tree() para '
+                              'procesar el arbol.')
         return self.__queries[i]['tables']['alias'].get(name, False)
 
     def is_subquery(self, name, i):
@@ -515,6 +636,9 @@ class Parser:
         Boolean
             True si es una subquery, False en caso contrario.
         """
+        if not self.__queries:
+            raise LookupError('El arbol no ha sido procesado todavia. Por favor ejecuta la funcion rename_tree() para '
+                              'procesar el arbol.')
         return 'subquery' in self.__queries[i]['tables']['alias'].get(name, {})
 
     @staticmethod
@@ -534,7 +658,7 @@ class Parser:
         return filter(lambda child: isinstance(child, nltk.Tree), tree)
 
     @staticmethod
-    def equal_columns(a, b):
+    def _equal_columns(a, b):
         """Comprueba que las columnas a y b son la misma, independientemente de su tabla.
 
         Parameters
@@ -551,7 +675,7 @@ class Parser:
         """
         return str(a).split('.')[-1].upper() == str(b).split('.')[-1].upper()
 
-    def get_unreferenced_table(self, i):
+    def _get_unreferenced_table(self, i):
         """Obtiene la tabla en una query en la que las columnas no llevan referencias a tablas. Solo es posible
         deducirlo si la query hace referencia a una sola tabla.
 
@@ -600,9 +724,12 @@ class Parser:
         -------
         boolean
         """
+        if not self.__queries:
+            raise LookupError('El arbol no ha sido procesado todavia. Por favor ejecuta la funcion rename_tree() para '
+                              'procesar el arbol.')
         return column in self.__queries[i]['columns']['alias']
 
-    def get_referenced_names(self, names, i):
+    def _get_referenced_names(self, names, i):
         """Obtiene, a partir de una referencia a columna, la tabla y la columna. Si no lleva referencia explicita a
         la tabla, la query solo puede consultar una tabla, en otro caso hay un error semantico y no se puede saber a
         quien se hace referencia.
@@ -622,9 +749,9 @@ class Parser:
         if self.is_referenced_column(names):
             return names.split('.')
         else:
-            return self.get_unreferenced_table(i), names
+            return self._get_unreferenced_table(i), names
 
-    def get_reference_in_subquery(self, current_column, target_i):
+    def __get_reference_in_subquery(self, current_column, target_i):
         """Encuentra el nombre que tiene una columna dentro de una subquery determinada.
 
         Parameters
@@ -648,24 +775,24 @@ class Parser:
         try:
             # Busca coincidencias en la subquery con el nombre de la columna actual
             new_reference = [e for e in self.__queries[target_i]['columns']['names'] if
-                             self.equal_columns(current_column, e)]
-            return self.get_referenced_names(new_reference[0], target_i)
+                             self._equal_columns(current_column, e)]
+            return self._get_referenced_names(new_reference[0], target_i)
         except IndexError:
             # La columna puede no estar en la subquery, pero pertenecer a la subtabla
             pass
 
         # Si no es un alias y va sin referencia a tabla, esta haciendo referencia a una columna de la subquery que no
         # aparece en la consulta pero que deberia existir. Esto solo se permite si la subquery consulta una sola tabla
-        table = self.get_unreferenced_table(target_i)
+        table = self._get_unreferenced_table(target_i)
 
         try:
             return table, self.__mapping[table]['fields'][current_column]
         except KeyError as err:
-            self.logger.warning("{}. La referencia a la columna '{}' de la tabla '{}' no se encuentra en los ficheros "
+            self._logger.warning("{}. La referencia a la columna '{}' de la tabla '{}' no se encuentra en los ficheros "
                                 "de mapping proporcionados. Se devuelve el nombre original".format(err, current_column, table))
             return table, current_column
 
-    def find_sub_column(self, current_table, current_column, i):
+    def __find_sub_column(self, current_table, current_column, i):
         """Dada una columna que hace referencia a una subquery, devuelve el nombre de la columna dentro de la subquery.
 
         Parameters
@@ -683,14 +810,14 @@ class Parser:
             Nombre de la subcolumna.
         """
         child_index = self.__queries[i]['tables']['alias'][current_table]['subquery']
-        new_table, new_column = self.get_reference_in_subquery(current_column, child_index)
+        new_table, new_column = self.__get_reference_in_subquery(current_column, child_index)
 
         if not new_table:  # era un alias
             return new_column
 
-        return self.change_column_name(new_table, new_column, child_index)[1]
+        return self.__change_column_name(new_table, new_column, child_index)[1]
 
-    def change_column_name(self, table_name, column_name, i):
+    def __change_column_name(self, table_name, column_name, i):
         """Cambia el nombre de una columna por el proporcionado en los ficheros de mapping.
 
         Parameters
@@ -715,7 +842,7 @@ class Parser:
         elif self.is_subquery(table_name, i):
             # Si es una subquery
             new_table = table_name  # el nombre de tabla es un alias
-            new_column = self.find_sub_column(table_name, column_name, i)
+            new_column = self.__find_sub_column(table_name, column_name, i)
         else:
             # Si es una referencia normal
             new_table = self.__mapping[table_name].get('new_name', table_name)
@@ -724,7 +851,7 @@ class Parser:
         return new_table, new_column
 
     @staticmethod
-    def is_referenced_column_node(parent, node):
+    def _is_referenced_column_node(parent, node):
         """Comprueba si el nodo pertenece a una columna con referencia a su tabla.
 
         Parameters
@@ -743,7 +870,7 @@ class Parser:
                and parent[1].label() == 'TABLE_NAMES'
 
     @staticmethod
-    def is_unreferenced_column_node(parent, node):
+    def _is_unreferenced_column_node(parent, node):
         """Comprueba si el nodo pertenece a una columna sin referencias a su tabla.
 
         Parameters
@@ -763,7 +890,7 @@ class Parser:
                and node.label() == 'COLUMN_NAMES'
 
     @staticmethod
-    def is_table(parent, node):
+    def _is_table(parent, node):
         """Comprueba si el nodo pertenece a una tabla.
 
         Parameters
@@ -802,7 +929,7 @@ class Parser:
         elif not tables:
             # Si tiene las tablas vacias, hace referencia a un alias
             table_name = next(iter(self.__queries[i]['tables']['alias']))
-            table_name, new_column = self.change_column_name(table_name, node[1][0], i)
+            table_name, new_column = self.__change_column_name(table_name, node[1][0], i)
         elif not self.is_column_alias(node[1][0], i):
             # Si no es un alias que haga referencia a la propia tabla, en una clausula where por ejemplo, sino que es
             # una referencia a una columna sin referencia a tabla
@@ -824,20 +951,20 @@ class Parser:
         i: int
             Indice de la query que se esta procesando.
         """
-        if self.is_referenced_column_node(node, child):
+        if self._is_referenced_column_node(node, child):
             # Columna con referencia a su tabla. El hijo de indice 1 es la tabla y el 3 la columna
-            node[1][0], node[3][0] = self.change_column_name(node[1][0], node[3][0], i)
-        elif self.is_unreferenced_column_node(node, child):
+            node[1][0], node[3][0] = self.__change_column_name(node[1][0], node[3][0], i)
+        elif self._is_unreferenced_column_node(node, child):
             # Columna sin referencia a su tabla. Solo se acepta si hay solamente 1 tabla
             _, _new_column = self._rename_orphan_column(node, i)
             node[1][0] = _new_column if _new_column else node[1][0]
-        elif self.is_table(node, child):
+        elif self._is_table(node, child):
             # Tabla
             child[0] = self.__mapping[child[0]].get('new_name', child[0])
         else:
-            self.rename_nodes(child, i)
+            self._rename_children(child, i)
 
-    def rename_nodes(self, node, i):
+    def _rename_children(self, node, i):
         """Renombra las tablas y las columnas de acuerdo a los ficheros de mapping. Los cambios tienen lugar en el
         propio arbol recibido por parametro, ya que es un objeto mutable.
 
@@ -852,12 +979,20 @@ class Parser:
 
     def rename_tree(self):
         """Procesa el AST y lleva a cabo el renombramiento conforme a los ficheros de mapping."""
-        self.process_tree(self.tree)
-        [self.rename_nodes(e[0], e[1]) for e in self.get_reverse_tree()]
+        if not self.tree:
+            raise LookupError('El arbol no ha sido generado todavia. Por tanto, todavia no hay ninguna query que '
+                              'renombrar. Por favor ejecuta la funcion parse_query() para generar el arbol')
+        
+        self.__queries_elements = []
+        self.__reverse_tree = []
+        self.__queries = {}
+        self._process_tree(self.tree)
+        [self._rename_children(e[0], e[1]) for e in self._get_reverse_tree()]
 
         return self
 
-    def remove_comment(self, line):
+    def _remove_comment(self, line):
+        """Elimina el comentario de una linea y lo almacena"""
         m = re.search(r'--.*', line)
         if m:
             comment = m.group(0)
@@ -867,12 +1002,13 @@ class Parser:
             return line
 
     @staticmethod
-    def find_numbers(line):
+    def _find_numbers(line):
+        """"Devuelve la lista de los numeros contenidos en la linea."""
         line = re.sub(r' +', ' ', line).strip()
         all_numbers = [int(e.strip()) for e in re.findall(r'^[0-9]+ | [0-9]+ | [0-9]+$', line)]
         return (' ' + str(e) + ' ' for e in all_numbers)
 
-    def find_between(self, string, start, end):
+    def _find_between(self, string, start, end):
         substrings = []
         start_index = string.find(start)
         if start_index > -1:
@@ -882,11 +1018,13 @@ class Parser:
                 end_index += start_offset
                 substrings.append(start + string[start_offset:end_index] + end)
                 end_offset = end_index + len(end)
-                return substrings + self.find_between(string[end_offset:], start, end)
+                return substrings + self._find_between(string[end_offset:], start, end)
 
         return []
 
-    def clean_line(self, line):
+    def _clean_line(self, line):
+        """Limpia una linea. Busca referencias a variables hive, literales y constantes; las remplaza por #WORD# y se
+        almacena todo para posteriormente reconstruir la query con la forma original."""
         if not line:
             return line
 
@@ -897,25 +1035,56 @@ class Parser:
                 .replace(')', ' ) ')
                 .replace('=', ' = ')
                 )
-        literals = self.find_between(line, start="${", end="}")
-        literals += self.find_between(line, start="'", end="'")
-        literals += self.find_numbers(line)
-        if literals:
+        variables = self._find_between(line, start="${", end="}")
+        variables += self._find_between(line, start="'", end="'")
+        variables += self._find_numbers(line)
+        if variables:
             line = str(' ' + str(line) + ' ')
-            return self.tokenize_literals(line, literals).upper()
+            return self._tokenize_vars(line, variables).upper()
         else:
             return line.upper()
 
-    def replace_literal(self, m, replacements):
-        self.__words.append(m.group(0))
-        return replacements[re.escape(m.group(0))]
+    def __replace_var(self, variable, replacements):
+        """Remplaza la variables por la que corresponda, segun el diccionario 'replacements'.
 
-    def tokenize_literals(self, line, literals, token=' #WORD# '):
-        replacements = {re.escape(k): token for k in iter(literals)}
+        Parameters
+        ----------
+        variable: str
+            Variable a sustituir.
+        replacements: dict
+            Diccionario con los remplazamientos a realizar.
+
+        Returns
+        -------
+        str
+            Variable sustituida.
+        """
+        self.__words.append(variable.group(0))
+        return replacements[re.escape(variable.group(0))]
+
+    def _tokenize_vars(self, line, variables, token=' #WORD# '):
+        """Tokeniza las variables en una linea sustituyendolos por el especificado por parametro.
+
+        Parameters
+        ----------
+        line: str
+            Linea.
+        variables: list(str)
+            Lista de variables.
+        token: str
+            Token que va a sustituir a las variables especificadas.
+
+        Returns
+        -------
+        str
+            Linea con las variables tokenizadas.
+        """
+        replacements = {re.escape(k): token for k in iter(variables)}
         pattern = re.compile("|".join(replacements.keys()))
-        return pattern.sub(lambda m: self.replace_literal(m, replacements), line)
+        return pattern.sub(lambda m: self.__replace_var(m, replacements), line)
 
-    def untokenize(self, line, token='#WORD#'):
+    def _untokenize(self, line, token='#WORD#'):
+        """Vuelve a poner las variables de una linea, sustituyendo a su token correspondiente."""
         if not self.__words:
             return line
 
@@ -923,12 +1092,31 @@ class Parser:
         pattern = re.compile("|".join(replacements.keys()))
         return pattern.sub(lambda m: replacements[re.escape(m.group(0))], line)
 
-    def get_words(self):
-        return self.__words
-
     def rebuild_query(self, pretty=True):
+        """Reconstruye la query representada por el arbol procesado. Se vuelven a poner las variables anteriormente
+        tokenizadas, se eliminan espacios utilizados para parsear y se vuelven a poner los comentarios eliminados al
+        principio de la query.
+
+        Parameters
+        ----------
+        pretty: boolean
+            Formatear la query a una forma humanamente amigable.
+
+        Returns
+        -------
+        str
+            Query reconstruida.
+        """
+        if not self.tree:
+            raise LookupError('El arbol no ha sido generado todavia. Por tanto, todavia no hay ninguna query que '
+                              'reconstruir. Por favor ejecuta la funcion parse_query() para generar el arbol')
+
+        if not self.__queries:
+            raise LookupError('El arbol no ha sido procesado todavia. Por favor ejecuta la funcion rename_tree() para '
+                              'procesar el arbol.')
+
         query = ' '.join(self.tree.leaves())
-        query = (self.untokenize(query)
+        query = (self._untokenize(query)
                  .replace(' , ', ', ')
                  .replace(' ; ', ';')
                  .replace(' ( ', ' (')
