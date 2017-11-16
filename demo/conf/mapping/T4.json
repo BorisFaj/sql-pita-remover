@@ -1,0 +1,13 @@
+{
+    "old_name": "T4",
+    "new_name": "nueva_t4",
+    "fields": {
+        "A": "nuevo_a_t4",
+        "B": "nuevo_b_t4",
+        "C": "nuevo_c_t4",
+        "D": "nuevo_d_t4",
+        "E": "nuevo_e_t4",
+        "F": "nuevo_f_t4",
+        "G": "nuevo_g_t4"
+    }
+}

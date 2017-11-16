@@ -1,0 +1,8 @@
+{
+    "old_name": "T6",
+    "new_name": "nueva_t6",
+    "fields": {
+        "A": "nuevo_a_t6",
+        "B": "nuevo_b_t6"
+    }
+}

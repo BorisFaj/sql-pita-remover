@@ -1,0 +1,6 @@
+{
+  "grammar_file": "../conf/grammar",
+  "mapping_dir": "conf/mapping",
+  "input_path": "data/query_input",
+  "output_path": "data/query_output"
+}
