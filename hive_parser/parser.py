@@ -23,7 +23,7 @@ class Parser:
         logging.basicConfig(level=log_level, format='%(levelname)s %(name)s %(asctime)s %(message)s')
         self._logger = logging.getLogger('hive_parser')
         self._config = self.load_json(conf)
-        self.__mapping = self._load_mapping_files(os.path.join(self._config['mapping_dir']))
+        self.__mapping = self.load_mapping_files(self._config['mapping_dir']) if 'mapping_dir' in self._config else None
         self.__queries_elements = []
         self.__reverse_tree = []
         self.__queries = {}
@@ -81,8 +81,9 @@ class Parser:
             path = self._config.get('input_path', None)
 
         if not os.path.exists(path):
-            raise NotADirectoryError("La carpeta especificada para leer los ficheros de queries '{}' no existe. "
-                                     "Por favor, comprueba que existe y que tiene los permisos adecuados".format(path))
+            self._logger.error("La carpeta especificada para leer los ficheros de queries '{}' no existe. Por favor, "
+                               "comprueba que existe y que tiene los permisos adecuados".format(path))
+            raise NotADirectoryError
 
         return {file: self._read_query_file(os.path.join(path, file)) for file in os.listdir(path)}
 
@@ -103,8 +104,9 @@ class Parser:
             path = self._config['output_path']
 
         if not os.path.exists(path):
-            raise NotADirectoryError("La carpeta de salida para guardar los ficheros renombrados '{}' no existe. "
-                                     "Por favor, comprueba que existe y que tiene los permisos adecuados".format(path))
+            self._logger.error("La carpeta de salida para guardar los ficheros renombrados '{}' no existe. Por favor, "
+                               "comprueba que existe y que tiene los permisos adecuados".format(path))
+            raise NotADirectoryError
 
         self.__comments = []
         compacted_queries = self.__process_file(queries)
@@ -283,12 +285,13 @@ class Parser:
             Diccionario que representa el json especificado.
         """
         if not os.path.exists(path):
-            raise FileNotFoundError('No se encuentra el fichero json especificado: {}'.format(path))
+            self._logger.error('No se encuentra el fichero json especificado: {}'.format(path))
+            raise FileNotFoundError
 
         js = open(path)
         return json.load(js)
 
-    def _load_mapping_files(self, path):
+    def load_mapping_files(self, path):
         """Carga los ficheros de mapping contenidos en el directorio especificado en un diccionario.
 
         Parameters
@@ -302,7 +305,8 @@ class Parser:
             Diccionario que representa todos los ficheros de mapping.
         """
         if not os.path.isdir(path):
-            raise FileNotFoundError('No se encuentra la ruta especificada: {}'.format(path))
+            self._logger.error('No se encuentra la ruta especificada: {}'.format(path))
+            raise FileNotFoundError
 
         return {f.replace('.json', ''): self.load_json(os.path.join(path, f)) for f in os.listdir(path)}
 
@@ -592,8 +596,9 @@ class Parser:
     def _get_reverse_tree(self):
         """Devuelve la lista de nodos extraidos en la funcion get_nodes."""
         if not self.__reverse_tree:
-            raise AssertionError('La query todavia no ha sido procesada. Por favor, ejecuta la funcion process_tree()'
-                                 'antes de volver a intentarlo.')
+            self._logger.error('La query todavia no ha sido procesada. Por favor, ejecuta la funcion process_tree() '
+                               'antes de volver a intentarlo.')
+            raise AssertionError
 
         return sorted(self.__reverse_tree, key=itemgetter(1), reverse=True)
 
@@ -617,8 +622,9 @@ class Parser:
             True si es un alias, False en caso contrario.
         """
         if not self.__queries:
-            raise LookupError('El arbol no ha sido procesado todavia. Por favor ejecuta la funcion rename_tree() para '
-                              'procesar el arbol.')
+            self._logger.error('El arbol no ha sido procesado todavia. Por favor ejecuta la funcion rename_tree() para '
+                               'procesar el arbol.')
+            raise LookupError
         return self.__queries[i]['tables']['alias'].get(name, False)
 
     def is_subquery(self, name, i):
@@ -637,8 +643,9 @@ class Parser:
             True si es una subquery, False en caso contrario.
         """
         if not self.__queries:
-            raise LookupError('El arbol no ha sido procesado todavia. Por favor ejecuta la funcion rename_tree() para '
-                              'procesar el arbol.')
+            self._logger.error('El arbol no ha sido procesado todavia. Por favor ejecuta la funcion rename_tree() para '
+                               'procesar el arbol.')
+            raise LookupError
         return 'subquery' in self.__queries[i]['tables']['alias'].get(name, {})
 
     @staticmethod
@@ -725,8 +732,10 @@ class Parser:
         boolean
         """
         if not self.__queries:
-            raise LookupError('El arbol no ha sido procesado todavia. Por favor ejecuta la funcion rename_tree() para '
-                              'procesar el arbol.')
+            self._logger.error('El arbol no ha sido procesado todavia. Por favor ejecuta la funcion rename_tree() para '
+                               'procesar el arbol.')
+            raise LookupError
+
         return column in self.__queries[i]['columns']['alias']
 
     def _get_referenced_names(self, names, i):
@@ -980,9 +989,15 @@ class Parser:
     def rename_tree(self):
         """Procesa el AST y lleva a cabo el renombramiento conforme a los ficheros de mapping."""
         if not self.tree:
-            raise LookupError('El arbol no ha sido generado todavia. Por tanto, todavia no hay ninguna query que '
-                              'renombrar. Por favor ejecuta la funcion parse_query() para generar el arbol')
-        
+            self._logger.error('El arbol no ha sido generado todavia. Por tanto, todavia no hay ninguna query que '
+                               'renombrar. Por favor ejecuta la funcion parse_query() para generar el arbol')
+            raise LookupError
+
+        if not self.__mapping:
+            self._logger.error('No se han cargado los ficheros de mapping. Por favor ejecuta la funcion '
+                               'load_mapping_files() para cargarlos antes de proceder al renombramiento.')
+            raise LookupError
+
         self.__queries_elements = []
         self.__reverse_tree = []
         self.__queries = {}
@@ -1108,12 +1123,14 @@ class Parser:
             Query reconstruida.
         """
         if not self.tree:
-            raise LookupError('El arbol no ha sido generado todavia. Por tanto, todavia no hay ninguna query que '
-                              'reconstruir. Por favor ejecuta la funcion parse_query() para generar el arbol')
+            self._logger.error('El arbol no ha sido generado todavia. Por tanto, todavia no hay ninguna query que '
+                               'reconstruir. Por favor ejecuta la funcion parse_query() para generar el arbol')
+            raise LookupError
 
         if not self.__queries:
-            raise LookupError('El arbol no ha sido procesado todavia. Por favor ejecuta la funcion rename_tree() para '
-                              'procesar el arbol.')
+            self._logger.error('El arbol no ha sido procesado todavia. Por favor ejecuta la funcion rename_tree() para '
+                               'procesar el arbol.')
+            raise LookupError
 
         query = ' '.join(self.tree.leaves())
         query = (self._untokenize(query)
