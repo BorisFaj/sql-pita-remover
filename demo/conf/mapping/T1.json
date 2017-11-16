@@ -1,0 +1,13 @@
+{
+    "old_name": "T1",
+    "new_name": "nueva_t1",
+    "fields": {
+        "A": "nuevo_a_t1",
+        "B": "nuevo_b_t1",
+        "C": "nuevo_c_t1",
+        "D": "nuevo_d_t1",
+        "E": "nuevo_e_t1",
+        "P": "nuevo_p_t1",
+        "WHERE_COLUMN": "nueva_where"
+    }
+}
