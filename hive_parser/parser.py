@@ -482,8 +482,8 @@ class Parser:
             Nodo progenitor del que se procesa.
         node: nltk.Tree
             Nodo que se procesa.
-        columns: list(str)
-            Lista de columnas extraidas hasta ahora.
+        columns: dict
+            Columnas extraidas hasta ahora.
 
         Returns
         -------
@@ -509,7 +509,7 @@ class Parser:
         ----------
         tree: nltk.Tree
             Nodo raiz.
-        columns: list(str)
+        columns: dict
             Lista de columnas.
 
         Returns
@@ -765,8 +765,6 @@ class Parser:
 
         Parameters
         ----------
-        current_table: str
-            Nombre de la tabla a la que hace referencia actualmente.
         current_column: str
             Nombre actual de la columna.
         target_i: int
@@ -1064,8 +1062,8 @@ class Parser:
 
         Parameters
         ----------
-        variable: str
-            Variable a sustituir.
+        variable: _sre.SRE_Match
+            Match de las variables a sustituir.
         replacements: dict
             Diccionario con los remplazamientos a realizar.
 
@@ -1103,9 +1101,16 @@ class Parser:
         if not self.__words:
             return line
 
-        replacements = {re.escape(token): k for k in self.__words}
-        pattern = re.compile("|".join(replacements.keys()))
-        return pattern.sub(lambda m: replacements[re.escape(m.group(0))], line)
+        if token not in line:
+            return line
+
+        i_start = line.find(token)
+        i_end = i_start + len(token)
+
+        new_word = self.__words[0]
+        self.__words = self.__words[1:]
+
+        return self._untokenize(line[:i_start] + new_word + line[i_end:], token)
 
     def rebuild_query(self, pretty=True):
         """Reconstruye la query representada por el arbol procesado. Se vuelven a poner las variables anteriormente
