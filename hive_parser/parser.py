@@ -13,9 +13,9 @@ from copy import copy
 
 class UnreferencedTableError(Exception):
     def __init__(self, tables):
-        super(UnreferencedTableError, self).__init__('Se ha solicitado el nombre de una tabla no referenciada '
-                                                     'explicitamente en la query pero la query hace referencia a mas '
-                                                     'de una tabla: {}'.format(tables))
+        super(UnreferencedTableError, self).__init__('Se ha solicitado el nombre de tabla de una columna que no esta '
+                                                     'referenciada explicitamente en la query pero la query hace '
+                                                     'referencia a mas de una tabla: {}'.format(tables))
 
 
 class Parser:
@@ -31,6 +31,7 @@ class Parser:
         self.__words = []
         self._terminals = None
         self.tree = None
+        self._creating_table = None
         self.__grammar = self._read_grammar_(self._config['grammar_file'])
 
     def get_grammar(self):
@@ -156,6 +157,7 @@ class Parser:
         self.__queries = {}
         parsed = self.parse_query(query)
         _out_path = os.path.join(path, file_name)
+        # ToDo: guardar nuevos mapping y persistir en ficheros. vaciar self._creating_table
         self.save_query(parsed.rename_tree().rebuild_query(), _out_path)
 
     @staticmethod
@@ -329,10 +331,12 @@ class Parser:
         Parser
             Devuelve un objeto parser que contiene el arbol generado en la variable Parser.tree.
         """
+        # ToDo: los comentarios se limpian antes, si se pasa a esta funcion una query con comentarios no la resuelve
         self.__words = []
         clean_query = self._clean_line(query)
         sent = clean_query.replace(',', ' , ').replace('.', ' . ').replace('(', ' ( ').replace(')', ' ) ')
         sent = [chunk.upper() for chunk in re.sub(' +', ' ', sent).split(' ') if chunk]
+        self._logger.debug('sent: {}'.format(sent))
         new_terminals = set(filter(lambda x: x not in self._terminals, sent))
         self.__grammar = self._read_grammar_(self._config['grammar_file'], new_terminals)
         parser = nltk.ChartParser(self.__grammar, trace=trace)
@@ -405,12 +409,12 @@ class Parser:
             _table_name = ''.join(node.leaves())
             if _table_name not in tables['names']:
                 tables['names'] += [_table_name]
-            self.__reverse_tree.append((parent, i))
+            self.__reverse_tree.append((parent, i, False))
         elif parent.label() == 'TABLE_ALIAS' and tables['names']:
             # Si es una referencia a un alias y este no es de una subquery
             tables['alias'].setdefault(node.leaves()[0], tables['names'][-1])
             self._logger.debug('Se mete nodo alias: {}'.format(parent))
-            self.__reverse_tree.append((parent, i))
+            self.__reverse_tree.append((parent, i, False))
 
         return skip_to
 
@@ -535,6 +539,58 @@ class Parser:
         table_name = table_node[0][0]
         if table_name in self.__mapping:
             table_node[0][0] = self.__mapping[table_name]['new_name']
+        elif node.label() == 'INSERT_EXPRESSION':
+            self._creating_table = ''.join(node[3].leaves())
+        elif node.label() == 'CREATE_EXPRESSION':
+            self._creating_table = ''.join(node[2].leaves())
+
+        self.__mapping.setdefault(self._creating_table, self.new_mapped_table(self._creating_table))
+        self._logger.debug('Creando tabla: {}. Se van a almacenar los nuevos mapeos'.format(self._creating_table))
+
+    @staticmethod
+    def new_mapped_table(old_name, new_name=None):
+        """Devuelva la estructura que tiene una en los ficheros de mapping vacia."""
+        if not new_name:
+            new_name = old_name
+
+        return {'old_name': old_name,
+                'new_name': new_name,
+                'fields': {}}
+
+
+    @staticmethod
+    def _is_final_name(node, i):
+        """Comprueba si el nodo en cuestion, hace referencia a un nombre final de columna en la tabla que se esta
+        creando. Esto es interesante porque puede afectar a futuras queries que dependan de esta tabla.
+        Se trata de detectar si la referencia esta dentro de una funcion/casewhen, en cuyo caso es irrelevante, o si es
+        un alias.
+
+        El objetivo final es poder crear nuevos ficheros de mapping a partir de las queries que se van procesando.
+
+        Parameters
+        ----------
+        node: nltk.Tree
+            Nodo a comprobar.
+        i: int
+            Indice de la [sub]query actual.
+        """
+        if node.label() != 'COLUMN_EXPRESSION':
+            return False
+
+        if i != 1:
+            # Es una subquery
+            return False
+
+        if node[1].leaves():
+            # Tiene alias, por tanto me da igual si cambia o no el otro nombre
+            return False
+
+        if node[0][0].label() == 'SELECT_COMPLEMENT':
+            # Se trata de una referencia directa a una columna
+            return True
+        else:
+            # Se trata de una funcion, case when, o variable. Lo normal seria que tuvieran alias pero no tiene por que
+            return False
 
     def __process_node(self, node, parent, root, i):
         """Realiza el procesamiento de un nodo. Extrae los nombres de columnas y tablas y sus alias correspondientes.
@@ -560,11 +616,12 @@ class Parser:
             self.__update_subqueries(i)
         elif node.label() == 'COLUMN_EXPRESSION':
             # Si es un nodo columna, se mete a la lista de procesados y se explora el trozo de query
-            self.__reverse_tree.append((node, i))
+            register_column = self._is_final_name(node, i)
+            self.__reverse_tree.append((node, i, register_column))
             self.__iter_column_node(node, self.__queries[i]['columns'])
         elif parent.label() == 'FROM_EXPRESSION' and node.label() != 'TABLE_EXPRESSION':
             # Si es un nodo from, se mete a la lista de procesados y se explora el trozo de query
-            self.__reverse_tree.append((node, i))
+            self.__reverse_tree.append((node, i, False))
             self.__iter_column_node(node, self.__queries[i]['columns'])
         elif parent.label() == 'TABLE_EXPRESSION' and node.label() != 'TABLE_EXPRESSION':
             # Si es un nodo tabla, se explora el trozo de query y se obtiene el nodo de la primera subquery que
@@ -700,7 +757,12 @@ class Parser:
         if len(tables) > 1:
             raise UnreferencedTableError(tables)
 
-        return tables[0]
+        self._logger.debug('Nombre de tabla no referenciada en query {}'.format(i))
+        self._logger.debug('To las queries: {}'.format(self.__queries[i]))
+        if len(tables):
+            return tables[0]
+        else:
+            return list(self.__queries[i]['tables']['alias'].keys())[0]
 
     @staticmethod
     def is_referenced_column(column):
@@ -796,7 +858,8 @@ class Parser:
             return table, self.__mapping[table]['fields'][current_column]
         except KeyError as err:
             self._logger.warning("{}. La referencia a la columna '{}' de la tabla '{}' no se encuentra en los ficheros "
-                                "de mapping proporcionados. Se devuelve el nombre original".format(err, current_column, table))
+                                "de mapping proporcionados ni en los generados."
+                                " Se devuelve el nombre original".format(err, current_column, table))
             return table, current_column
 
     def __find_sub_column(self, current_table, current_column, i):
@@ -932,6 +995,7 @@ class Parser:
         table_name = None
         new_column = None
         if len(tables) > 1:
+            self._logger.error('No se puede determinar la tabla de referencia del campo {}'.format(''.join(node.leaves())))
             raise UnreferencedTableError(tables)
         elif not tables:
             # Si tiene las tablas vacias, hace referencia a un alias
@@ -941,11 +1005,26 @@ class Parser:
             # Si no es un alias que haga referencia a la propia tabla, en una clausula where por ejemplo, sino que es
             # una referencia a una columna sin referencia a tabla
             table_name = tables[0]
-            new_column = self.__mapping[table_name]['fields'][node[1][0]]
+            try:
+                new_column = self.__mapping[table_name]['fields'][node[1][0]]
+            except KeyError:
+                self._logger.warning("Nombre de columna no encontrado en los ficheros de mapping: '{}'. Se deja el "
+                                     "nombre original".format(node[1][0]))
+                new_column = node[1][0]
 
         return table_name, new_column
 
-    def _process_names(self, node, child, i):
+    def _register_column(self, old_name, new_name, register):
+        if not register:
+            return
+
+        if not self._creating_table:
+            return
+
+        self._logger.debug("Registro nuevo mapeo: '{}' por '{}'".format(old_name, new_name))
+        self.__mapping[self._creating_table]['fields'].setdefault(old_name, new_name)
+
+    def _process_names(self, node, child, i, register):
         """Procesa un nodo del AST. En caso de que este contenga un nombre de tabla o columna, lo renombra, en otro
         caso, continua recorriendo en profundidad el nodo.
 
@@ -960,18 +1039,28 @@ class Parser:
         """
         if self._is_referenced_column_node(node, child):
             # Columna con referencia a su tabla. El hijo de indice 1 es la tabla y el 3 la columna
-            node[1][0], node[3][0] = self.__change_column_name(node[1][0], node[3][0], i)
+            _old_name = node[3][0]
+            node[1][0], node[3][0] = self.__change_column_name(node[1][0], _old_name, i)
+            self._register_column(_old_name, node[3][0], register)
         elif self._is_unreferenced_column_node(node, child):
             # Columna sin referencia a su tabla. Solo se acepta si hay solamente 1 tabla
             _, _new_column = self._rename_orphan_column(node, i)
-            node[1][0] = _new_column if _new_column else node[1][0]
+            _new_column = _new_column if _new_column else node[1][0]
+            self._register_column(node[1][0], _new_column, register)
+            node[1][0] = _new_column
         elif self._is_table(node, child):
             # Tabla
-            child[0] = self.__mapping[child[0]].get('new_name', child[0])
-        else:
-            self._rename_children(child, i)
+            try:
+                child[0] = self.__mapping[child[0]].get('new_name', child[0])
+            except KeyError:
+                self._logger.warning('No se ha encontrado la tabla {} en los ficheros de mapping, por lo tanto, ninguna'
+                                     ' referencia a esta tabla sera renombrada'.format(child[0]))
+                self.__mapping.setdefault(child[0], self.new_mapped_table(child[0]))
 
-    def _rename_children(self, node, i):
+        else:
+            self._rename_children(child, i, register)
+
+    def _rename_children(self, node, i, register_column):
         """Renombra las tablas y las columnas de acuerdo a los ficheros de mapping. Los cambios tienen lugar en el
         propio arbol recibido por parametro, ya que es un objeto mutable.
 
@@ -982,7 +1071,7 @@ class Parser:
         i: int
             Indice de la query que se esta procesando.
         """
-        [self._process_names(node, child, i) for child in self.get_subtrees(node)]
+        [self._process_names(node, child, i, register_column) for child in self.get_subtrees(node)]
 
     def rename_tree(self):
         """Procesa el AST y lleva a cabo el renombramiento conforme a los ficheros de mapping."""
@@ -1000,7 +1089,7 @@ class Parser:
         self.__reverse_tree = []
         self.__queries = {}
         self._process_tree(self.tree)
-        [self._rename_children(e[0], e[1]) for e in self._get_reverse_tree()]
+        [self._rename_children(e[0], e[1], e[2]) for e in self._get_reverse_tree()]
 
         return self
 
