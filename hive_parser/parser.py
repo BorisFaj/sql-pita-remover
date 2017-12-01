@@ -12,13 +12,12 @@ from copy import copy
 
 
 class UnreferencedTableError(Exception):
-    def __init__(self, tables):
-        super(UnreferencedTableError, self).__init__('Se ha solicitado el nombre de tabla de una columna que no esta '
-                                                     'referenciada explicitamente en la query pero la query hace '
-                                                     'referencia a mas de una tabla: {}'.format(tables))
+    def __init__(self, msg):
+        super(UnreferencedTableError, self).__init__(msg)
 
 
 class Parser:
+    # ToDo: dar soporte para udfs
     def __init__(self, conf, log_level=logging.INFO):
         logging.basicConfig(level=log_level, format='%(levelname)s %(name)s %(asctime)s %(message)s')
         self._logger = logging.getLogger('hive_parser')
@@ -342,6 +341,13 @@ class Parser:
         parser = nltk.ChartParser(self.__grammar, trace=trace)
 
         self.tree = next(parser.parse(sent), None)
+
+        if not self.tree:
+            raise SyntaxError('La query proporcionada no es una sentencia de la gramatica utilizada. Los siguientes no '
+                              'terminales han sido incluidos en la gramatica como tablas o columnas, si alguno de '
+                              'ellos deberia hacer referencia a una funcion o a otra regla de produccion, esta puede '
+                              'ser la causa del error: {}'.format(new_terminals))
+
         return self
 
     def __update_subqueries(self, i):
@@ -557,7 +563,6 @@ class Parser:
                 'new_name': new_name,
                 'fields': {}}
 
-
     @staticmethod
     def _is_final_name(node, i):
         """Comprueba si el nodo en cuestion, hace referencia a un nombre final de columna en la tabla que se esta
@@ -703,6 +708,7 @@ class Parser:
             self._logger.error('El arbol no ha sido procesado todavia. Por favor ejecuta la funcion rename_tree() para '
                                'procesar el arbol.')
             raise LookupError
+
         return 'subquery' in self.__queries[i]['tables']['alias'].get(name, {})
 
     @staticmethod
@@ -755,7 +761,9 @@ class Parser:
         """
         tables = self.__queries[i]['tables']['names']
         if len(tables) > 1:
-            raise UnreferencedTableError(tables)
+            raise UnreferencedTableError('Se ha solicitado el nombre de tabla de una columna que no esta referenciada '
+                                         'explicitamente en la query pero la query hace referencia a mas de una tabla: '
+                                         '{}'.format(tables))
 
         self._logger.debug('Nombre de tabla no referenciada en query {}'.format(i))
         self._logger.debug('To las queries: {}'.format(self.__queries[i]))
@@ -858,12 +866,13 @@ class Parser:
             return table, self.__mapping[table]['fields'][current_column]
         except KeyError as err:
             self._logger.warning("{}. La referencia a la columna '{}' de la tabla '{}' no se encuentra en los ficheros "
-                                "de mapping proporcionados ni en los generados."
-                                " Se devuelve el nombre original".format(err, current_column, table))
+                                 "de mapping proporcionados ni en los generados."
+                                 " Se devuelve el nombre original".format(err, current_column, table))
             return table, current_column
 
     def __find_sub_column(self, current_table, current_column, i):
-        """Dada una columna que hace referencia a una subquery, devuelve el nombre de la columna dentro de la subquery.
+        """Dada una columna que hace referencia a una subquery, devuelve el nombre de la columna dentro de la subquery
+        y la tabla a la que pertenece.
 
         Parameters
         ----------
@@ -876,16 +885,17 @@ class Parser:
 
         Returns
         -------
-        str
-            Nombre de la subcolumna.
+        (str, str)
+            Nombre de la subtabla, nombre de la subcolumna.
         """
         child_index = self.__queries[i]['tables']['alias'][current_table]['subquery']
         new_table, new_column = self.__get_reference_in_subquery(current_column, child_index)
 
         if not new_table:  # era un alias
-            return new_column
+            self._logger.debug('new table: {}'.format(new_table))
+            return None, new_column
 
-        return self.__change_column_name(new_table, new_column, child_index)[1]
+        return self.__change_column_name(new_table, new_column, child_index)
 
     def __change_column_name(self, table_name, column_name, i):
         """Cambia el nombre de una columna por el proporcionado en los ficheros de mapping.
@@ -912,11 +922,13 @@ class Parser:
         elif self.is_subquery(table_name, i):
             # Si es una subquery
             new_table = table_name  # el nombre de tabla es un alias
-            new_column = self.__find_sub_column(table_name, column_name, i)
+            _, new_column = self.__find_sub_column(table_name, column_name, i)
         else:
             # Si es una referencia normal
             new_table = self.__mapping[table_name].get('new_name', table_name)
             new_column = self.__mapping[table_name]['fields'].get(column_name, column_name)
+
+        self._logger.debug('new cosas: {}, {}'.format(new_table, new_column))
 
         return new_table, new_column
 
@@ -976,6 +988,28 @@ class Parser:
         """
         return parent.label() == 'TABLE_REFERENCE' and node.label() == 'TABLE_NAMES'
 
+    def _deduce_table(self, i, column, possible_tables=None):
+        if not possible_tables:
+            # todas
+            possible_tables = self.__mapping.keys()
+
+        possible_tables = [self.__find_sub_column(table, column, i)[0] if self.is_subquery(table, i) else table
+                           for table in possible_tables]
+        matching_tables = [table for table in possible_tables if column in self.__mapping[table]['fields']]
+
+        if len(matching_tables) > 1:
+            raise UnreferencedTableError('Referencia ambigua. El campo {} no hace referencia explicita '
+                                         'a ninguna tabla, podria pertenecer a varias tablas: {}'.format(
+                                             column, matching_tables))
+
+        if not matching_tables:
+            raise UnreferencedTableError('Referencia no encontrada. El campo {} no hace referencia explicita '
+                                         'a ninguna tabla y no es posible determinar con los ficheros de mapeo '
+                                         'a que tabla pertenece'.format(
+                                             column, matching_tables))
+
+        return matching_tables[0]
+
     def _rename_orphan_column(self, node, i):
         """Renombra una columna que no lleva referencia a ninguna tabla.
 
@@ -995,14 +1029,15 @@ class Parser:
         table_name = None
         new_column = None
         if len(tables) > 1:
-            self._logger.error('No se puede determinar la tabla de referencia del campo {}'.format(''.join(node.leaves())))
-            raise UnreferencedTableError(tables)
-        elif not tables:
+            # Si hay mas de una tabla, busca en los mapeos a que tabla pertenece el campo
+            tables = self._deduce_table(i, node.leaves()[0], tables)
+
+        if not tables:
             # Si tiene las tablas vacias, hace referencia a un alias
             table_name = next(iter(self.__queries[i]['tables']['alias']))
             table_name, new_column = self.__change_column_name(table_name, node[1][0], i)
         elif not self.is_column_alias(node[1][0], i):
-            # Si no es un alias que haga referencia a la propia tabla, en una clausula where por ejemplo, sino que es
+            # No es un alias que haga referencia a la propia tabla, en una clausula where por ejemplo, sino que es
             # una referencia a una columna sin referencia a tabla
             table_name = tables[0]
             try:
