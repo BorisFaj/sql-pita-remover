@@ -16,8 +16,14 @@ class UnreferencedTableError(Exception):
         super(UnreferencedTableError, self).__init__(msg)
 
 
+class OutOfGrammarException(Exception):
+    def __init__(self, msg):
+        super(OutOfGrammarException, self).__init__(msg)
+
+
 class Parser:
     # ToDo: dar soporte para udfs
+    # ToDo: log en fichero
     def __init__(self, conf, log_level=logging.INFO):
         logging.basicConfig(level=log_level, format='%(levelname)s %(name)s %(asctime)s %(message)s')
         self._logger = logging.getLogger('hive_parser')
@@ -111,7 +117,8 @@ class Parser:
         self.__comments = []
         compacted_queries = self.__process_file(queries)
 
-        [[self.__parse_and_save(query, file, path) for query in queries if query] for file, queries in compacted_queries]
+        [[self.__parse_and_save(query, file, path) for query in queries if query.strip()] for file, queries in
+         compacted_queries]
         self._logger.info('Todas las queries han sido correctamente renombradas y almacenadas en la ruta {}'.format(path))
 
     def __process_file(self, queries):
@@ -154,10 +161,17 @@ class Parser:
         self.__queries_elements = []
         self.__reverse_tree = []
         self.__queries = {}
-        parsed = self.parse_query(query)
         _out_path = os.path.join(path, file_name)
-        # ToDo: guardar nuevos mapping y persistir en ficheros. vaciar self._creating_table
-        self.save_query(parsed.rename_tree().rebuild_query(), _out_path)
+        try:
+            parsed = self.parse_query(query)
+            # ToDo: guardar nuevos mapping y persistir en ficheros. vaciar self._creating_table
+            self.save_query(parsed.rename_tree().rebuild_query(), _out_path)
+        except OutOfGrammarException as err:
+            # No se reconoce en la gramatica, se guarda tal cual. Puede ser un seteo de parametros de hive
+            self._logger.warning('La gramatica de la query no se reconoce, se almacena sin modificaciones. {}. '
+                                 '{}'.format(query, err))
+            self.save_query(query, _out_path)
+
 
     @staticmethod
     def save_query(query, file):
@@ -335,6 +349,13 @@ class Parser:
         clean_query = self._clean_line(query)
         sent = clean_query.replace(',', ' , ').replace('.', ' . ').replace('(', ' ( ').replace(')', ' ) ')
         sent = [chunk.upper() for chunk in re.sub(' +', ' ', sent).split(' ') if chunk]
+
+        if not sent:
+            raise OutOfGrammarException('La query introducida no pertenece a la gramatica de hive.')
+        if sent[0] == 'SET':
+            raise OutOfGrammarException('Procesando sentencia de configuracion, no es gramatica de hive: '
+                                        '{}'.format(sent))
+
         self._logger.debug('sent: {}'.format(sent))
         new_terminals = set(filter(lambda x: x not in self._terminals, sent))
         self.__grammar = self._read_grammar_(self._config['grammar_file'], new_terminals)
@@ -343,10 +364,11 @@ class Parser:
         self.tree = next(parser.parse(sent), None)
 
         if not self.tree:
-            raise SyntaxError('La query proporcionada no es una sentencia de la gramatica utilizada. Los siguientes no '
-                              'terminales han sido incluidos en la gramatica como tablas o columnas, si alguno de '
-                              'ellos deberia hacer referencia a una funcion o a otra regla de produccion, esta puede '
-                              'ser la causa del error: {}'.format(new_terminals))
+            raise OutOfGrammarException('La query proporcionada no es una sentencia de la gramatica utilizada. Los '
+                                        'siguientes no terminales han sido incluidos en la gramatica como tablas o '
+                                        'columnas, si alguno de ellos deberia hacer referencia a una funcion o a otra '
+                                        'regla de produccion, esta puede ser la causa del error: '
+                                        '{}'.format(new_terminals))
 
         return self
 
@@ -745,9 +767,8 @@ class Parser:
         """
         return str(a).split('.')[-1].upper() == str(b).split('.')[-1].upper()
 
-    def _get_unreferenced_table(self, i):
-        """Obtiene la tabla en una query en la que las columnas no llevan referencias a tablas. Solo es posible
-        deducirlo si la query hace referencia a una sola tabla.
+    def _get_unreferenced_table(self, i, column):
+        """Obtiene la tabla en una query en la que las columnas no llevan referencias a tablas.
 
         Parameters
         ----------
@@ -761,12 +782,8 @@ class Parser:
         """
         tables = self.__queries[i]['tables']['names']
         if len(tables) > 1:
-            raise UnreferencedTableError('Se ha solicitado el nombre de tabla de una columna que no esta referenciada '
-                                         'explicitamente en la query pero la query hace referencia a mas de una tabla: '
-                                         '{}'.format(tables))
+            tables = [self._deduce_table(i, column, tables)]
 
-        self._logger.debug('Nombre de tabla no referenciada en query {}'.format(i))
-        self._logger.debug('To las queries: {}'.format(self.__queries[i]))
         if len(tables):
             return tables[0]
         else:
@@ -828,7 +845,7 @@ class Parser:
         if self.is_referenced_column(names):
             return names.split('.')
         else:
-            return self._get_unreferenced_table(i), names
+            return self._get_unreferenced_table(i, names), names
 
     def __get_reference_in_subquery(self, current_column, target_i):
         """Encuentra el nombre que tiene una columna dentro de una subquery determinada.
@@ -860,7 +877,7 @@ class Parser:
 
         # Si no es un alias y va sin referencia a tabla, esta haciendo referencia a una columna de la subquery que no
         # aparece en la consulta pero que deberia existir. Esto solo se permite si la subquery consulta una sola tabla
-        table = self._get_unreferenced_table(target_i)
+        table = self._get_unreferenced_table(target_i, current_column)
 
         try:
             return table, self.__mapping[table]['fields'][current_column]
@@ -885,14 +902,13 @@ class Parser:
 
         Returns
         -------
-        (str, str)
+        (str, str, int)
             Nombre de la subtabla, nombre de la subcolumna.
         """
         child_index = self.__queries[i]['tables']['alias'][current_table]['subquery']
         new_table, new_column = self.__get_reference_in_subquery(current_column, child_index)
 
         if not new_table:  # era un alias
-            self._logger.debug('new table: {}'.format(new_table))
             return None, new_column
 
         return self.__change_column_name(new_table, new_column, child_index)
@@ -927,8 +943,6 @@ class Parser:
             # Si es una referencia normal
             new_table = self.__mapping[table_name].get('new_name', table_name)
             new_column = self.__mapping[table_name]['fields'].get(column_name, column_name)
-
-        self._logger.debug('new cosas: {}, {}'.format(new_table, new_column))
 
         return new_table, new_column
 
@@ -991,22 +1005,30 @@ class Parser:
     def _deduce_table(self, i, column, possible_tables=None):
         if not possible_tables:
             # todas
+            self._logger.warning('Se intenta deducir la tabla pero no se obtiene referencia desde la query. Se procede'
+                                 ' a buscar el campo en todas las tablas mapeadas hasta el momento.')
             possible_tables = self.__mapping.keys()
 
         possible_tables = [self.__find_sub_column(table, column, i)[0] if self.is_subquery(table, i) else table
                            for table in possible_tables]
-        matching_tables = [table for table in possible_tables if column in self.__mapping[table]['fields']]
+
+        try:
+            matching_tables = [table for table in possible_tables if column in self.__mapping[table]['fields']]
+        except KeyError as key:
+            self._logger.warning("La tabla '{}' no se encuentra en los ficheros de mapping. Por favor, asegura "
+                                 "que ha sido anteriormente procesada y/o incluida en los ficheros de "
+                                 "mapping.".format(key))
+            return
 
         if len(matching_tables) > 1:
             raise UnreferencedTableError('Referencia ambigua. El campo {} no hace referencia explicita '
-                                         'a ninguna tabla, podria pertenecer a varias tablas: {}'.format(
-                                             column, matching_tables))
+                                         'a ninguna tabla. Se ha intentado deducir pero podria pertenecer a varias '
+                                         'tablas: {}'.format(column, matching_tables))
 
         if not matching_tables:
-            raise UnreferencedTableError('Referencia no encontrada. El campo {} no hace referencia explicita '
-                                         'a ninguna tabla y no es posible determinar con los ficheros de mapeo '
-                                         'a que tabla pertenece'.format(
-                                             column, matching_tables))
+            # O es un campo creado en una clausula WINDOW o no se puede determinar el origen
+            # En cualquier caso, se devuelve vacio para que se registre el warning en el log y no se cambie el nombre
+            return
 
         return matching_tables[0]
 
@@ -1049,15 +1071,32 @@ class Parser:
 
         return table_name, new_column
 
-    def _register_column(self, old_name, new_name, register):
+    def _get_subtable(self, current_table, current_column, i):
+        if self.is_subquery(current_table, i):
+            child_index = self.__queries[i]['tables']['alias'][current_table]['subquery']
+            new_table, new_column = self.__get_reference_in_subquery(current_column, child_index)
+
+            return self._get_subtable(new_table, new_column, child_index)
+
+        return current_table, current_column
+
+    def _register_column(self, i, old_name, new_name, register, table_name=None):
         if not register:
             return
 
         if not self._creating_table:
             return
 
-        self._logger.debug("Registro nuevo mapeo: '{}' por '{}'".format(old_name, new_name))
-        self.__mapping[self._creating_table]['fields'].setdefault(old_name, new_name)
+        if '*' in old_name:
+            table_name = self._get_unreferenced_table(i, old_name) if table_name is None else table_name
+            original_table, _ = self._get_subtable(table_name, old_name, i)
+            self._logger.debug("Registrando un '*' en {}, la tabla de referencia es: {}".format(self._creating_table,
+                                                                                                original_table))
+            [self.__mapping[self._creating_table]['fields'].setdefault(old, new) for old, new in
+             self.__mapping[original_table]['fields'].items()]
+        else:
+            self._logger.debug("Registro nuevo mapeo: '{}' por '{}'".format(old_name, new_name))
+            self.__mapping[self._creating_table]['fields'].setdefault(old_name, new_name)
 
     def _process_names(self, node, child, i, register):
         """Procesa un nodo del AST. En caso de que este contenga un nombre de tabla o columna, lo renombra, en otro
@@ -1076,12 +1115,12 @@ class Parser:
             # Columna con referencia a su tabla. El hijo de indice 1 es la tabla y el 3 la columna
             _old_name = node[3][0]
             node[1][0], node[3][0] = self.__change_column_name(node[1][0], _old_name, i)
-            self._register_column(_old_name, node[3][0], register)
+            self._register_column(i, _old_name, node[3][0], register, node[1][0])
         elif self._is_unreferenced_column_node(node, child):
-            # Columna sin referencia a su tabla. Solo se acepta si hay solamente 1 tabla
+            # Columna sin referencia a su tabla
             _, _new_column = self._rename_orphan_column(node, i)
             _new_column = _new_column if _new_column else node[1][0]
-            self._register_column(node[1][0], _new_column, register)
+            self._register_column(i, node[1][0], _new_column, register)
             node[1][0] = _new_column
         elif self._is_table(node, child):
             # Tabla
@@ -1236,7 +1275,7 @@ class Parser:
 
         return self._untokenize(line[:i_start] + new_word + line[i_end:], token)
 
-    def rebuild_query(self, pretty=True):
+    def rebuild_query(self, comments=True, pretty=True):
         """Reconstruye la query representada por el arbol procesado. Se vuelven a poner las variables anteriormente
         tokenizadas, se eliminan espacios utilizados para parsear y se vuelven a poner los comentarios eliminados al
         principio de la query.
@@ -1271,7 +1310,11 @@ class Parser:
                  .replace(' . ', '.')
                  )
 
+        # ToDo: colocar los comentarios en su sitio, solo al principio, en caso del procesamiento masivo
         if pretty:
-            return '\n'.join(self.__comments) + '\n' + sqlparse.format(query, reindent=True, keyword_case='upper')
+            if comments:
+                return '\n'.join(self.__comments) + '\n' + sqlparse.format(query, reindent=True, keyword_case='upper')
+            else:
+                return sqlparse.format(query, reindent=True, keyword_case='upper')
         else:
             return query
