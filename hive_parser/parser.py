@@ -22,13 +22,12 @@ class OutOfGrammarException(Exception):
 
 
 class Parser:
-    # ToDo: log en fichero
-    def __init__(self, conf, udfs=None, log_level=logging.INFO):
+    def __init__(self, conf, udfs=None, logger=None, log_level=logging.INFO):
         logging.basicConfig(level=log_level, format='%(levelname)s %(name)s %(asctime)s %(message)s')
         self.tree = None
         self.udfs = [udfs] if not isinstance(udfs, list) and udfs is not None else udfs
         self._udfs_norm = [udf.replace('.', '_').upper() for udf in self.udfs]
-        self._logger = logging.getLogger('hive_parser')
+        self._logger = logging.getLogger('hive_parser') if not logger else logger
         self._config = self.load_json(conf)
         self._terminals = None
         self._creating_table = None
