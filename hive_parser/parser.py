@@ -22,21 +22,22 @@ class OutOfGrammarException(Exception):
 
 
 class Parser:
-    # ToDo: dar soporte para udfs
     # ToDo: log en fichero
-    def __init__(self, conf, log_level=logging.INFO):
+    def __init__(self, conf, udfs=None, log_level=logging.INFO):
         logging.basicConfig(level=log_level, format='%(levelname)s %(name)s %(asctime)s %(message)s')
+        self.tree = None
+        self.udfs = [udfs] if not isinstance(udfs, list) and udfs is not None else udfs
+        self._udfs_norm = [udf.replace('.', '_').upper() for udf in self.udfs]
         self._logger = logging.getLogger('hive_parser')
         self._config = self.load_json(conf)
+        self._terminals = None
+        self._creating_table = None
         self.__mapping = self.load_mapping_files(self._config['mapping_dir']) if 'mapping_dir' in self._config else None
         self.__queries_elements = []
         self.__reverse_tree = []
         self.__queries = {}
         self.__comments = []
         self.__words = []
-        self._terminals = None
-        self.tree = None
-        self._creating_table = None
         self.__grammar = self._read_grammar_(self._config['grammar_file'])
 
     def get_grammar(self):
@@ -233,16 +234,18 @@ class Parser:
 
         f = open(path, 'r')
         grammar_file = ' '.join(f.readlines())
+        extras = []
         self._terminals = [t.upper().strip().replace("'", "") for t in self._find_between(grammar_file, "'", "'")]
         if new_terminals:
             new_tables, new_columns = zip(*[self.__str_to_terminals(t) for t in new_terminals])
-            tables = '\nTABLE_NAMES -> ' + '|'.join(new_tables)
-            columns = '\nCOLUMN_NAMES ->' + '|'.join(new_columns)
+            extras.append('TABLE_NAMES -> ' + '|'.join(new_tables))
+            extras.append('COLUMN_NAMES ->' + '|'.join(new_columns))
 
-            return nltk.CFG.fromstring(grammar_file + tables + columns)
+        if self.udfs:
+            new_udfs = [self.__str_to_terminals(e)[0] for e in self._udfs_norm]
+            extras.append('FUNCTION_NAMES -> ' + '|'.join(new_udfs))
 
-        else:
-            return nltk.CFG.fromstring(grammar_file)
+        return nltk.CFG.fromstring('\n'.join([grammar_file] + extras))
 
     @staticmethod
     def __skip_to_node(target, current):
@@ -344,7 +347,10 @@ class Parser:
         Parser
             Devuelve un objeto parser que contiene el arbol generado en la variable Parser.tree.
         """
-        # ToDo: los comentarios se limpian antes, si se pasa a esta funcion una query con comentarios no la resuelve
+        if '--' in query:
+            raise OutOfGrammarException('No se pueden parsear directamente queries con comentarios. Solo es posible '
+                                        'en el procesamiento masivo de ficheros si estan correctamente formateados.')
+
         self.__words = []
         clean_query = self._clean_line(query)
         sent = clean_query.replace(',', ' , ').replace('.', ' . ').replace('(', ' ( ').replace(')', ' ) ')
@@ -357,7 +363,8 @@ class Parser:
                                         '{}'.format(sent))
 
         self._logger.debug('sent: {}'.format(sent))
-        new_terminals = set(filter(lambda x: x not in self._terminals, sent))
+        new_terminals = set(filter(lambda x: x not in self._terminals + self._udfs_norm, sent))
+        self._logger.debug('new terminals: {}'.format(new_terminals))
         self.__grammar = self._read_grammar_(self._config['grammar_file'], new_terminals)
         parser = nltk.ChartParser(self.__grammar, trace=trace)
 
@@ -1204,6 +1211,11 @@ class Parser:
         if not line:
             return line
 
+        if self.udfs:
+            for point, scape in zip(self.udfs, self._udfs_norm):
+                pattern = re.compile(point, re.IGNORECASE)
+                line = pattern.sub(scape, line)
+
         line = (line
                 .replace(',', ' , ')
                 .replace(';', ' ; ')
@@ -1214,6 +1226,7 @@ class Parser:
         variables = self._find_between(line, start="${", end="}")
         variables += self._find_between(line, start="'", end="'")
         variables += self._find_numbers(line)
+
         if variables:
             line = str(' ' + str(line) + ' ')
             return self._tokenize_vars(line, variables).upper()
@@ -1310,10 +1323,16 @@ class Parser:
                  .replace(' . ', '.')
                  )
 
-        # ToDo: colocar los comentarios en su sitio, solo al principio, en caso del procesamiento masivo
+        if self.udfs:
+            for point, scape in zip(self.udfs, self._udfs_norm):
+                pattern = re.compile(scape, re.IGNORECASE)
+                query = pattern.sub(point, query)
+
         if pretty:
             if comments:
-                return '\n'.join(self.__comments) + '\n' + sqlparse.format(query, reindent=True, keyword_case='upper')
+                final = '\n'.join(self.__comments) + '\n' + sqlparse.format(query, reindent=True, keyword_case='upper')
+                self.__comments = []
+                return final
             else:
                 return sqlparse.format(query, reindent=True, keyword_case='upper')
         else:
