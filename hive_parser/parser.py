@@ -164,7 +164,6 @@ class Parser:
         _out_path = os.path.join(path, file_name)
         try:
             parsed = self.parse_query(query)
-            # ToDo: guardar nuevos mapping y persistir en ficheros. vaciar self._creating_table
             self.save_query(parsed.rename_tree().rebuild_query(), _out_path)
         except OutOfGrammarException as err:
             # No se reconoce en la gramatica, se guarda tal cual. Puede ser un seteo de parametros de hive
@@ -172,6 +171,26 @@ class Parser:
                                  '{}'.format(query, err))
             self.save_query(query, _out_path)
 
+        if self._creating_table:
+            self.save_json(self.__mapping[self._creating_table],
+                           os.path.join(self._config['mapping_dir'], self._creating_table + '.json'))
+            self._creating_table = None
+
+
+    @staticmethod
+    def save_json(output, file):
+        """Persiste un diccionario en el fichero json indicado.
+
+        Parameters
+        ----------
+        output: dict
+            Datos a persistir.
+        file: str
+            Fichero de salida.
+        """
+        out_file = open(file, "w")
+        out_file.write(json.dumps(output, indent=4, sort_keys=True))
+        out_file.close()
 
     @staticmethod
     def save_query(query, file):
@@ -612,10 +631,6 @@ class Parser:
 
         if i != 1:
             # Es una subquery
-            return False
-
-        if node[1].leaves():
-            # Tiene alias, por tanto me da igual si cambia o no el otro nombre
             return False
 
         if node[0][0].label() == 'SELECT_COMPLEMENT':
@@ -1117,6 +1132,7 @@ class Parser:
         i: int
             Indice de la query que se esta procesando.
         """
+        # ToDo: en register_column hay que ser capaz de almacenar el alias, si tiene
         if self._is_referenced_column_node(node, child):
             # Columna con referencia a su tabla. El hijo de indice 1 es la tabla y el 3 la columna
             _old_name = node[3][0]
@@ -1125,6 +1141,7 @@ class Parser:
         elif self._is_unreferenced_column_node(node, child):
             # Columna sin referencia a su tabla
             _, _new_column = self._rename_orphan_column(node, i)
+            self._logger.debug('New column: {}. Nodo: {}'.format(_new_column, node))
             _new_column = _new_column if _new_column else node[1][0]
             self._register_column(i, node[1][0], _new_column, register)
             node[1][0] = _new_column
