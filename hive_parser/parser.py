@@ -593,6 +593,7 @@ class Parser:
         table_name = table_node[0][0]
         if table_name in self.__mapping:
             table_node[0][0] = self.__mapping[table_name]['new_name']
+            self._creating_table = table_name
         elif node.label() == 'INSERT_EXPRESSION':
             self._creating_table = ''.join(node[3].leaves())
         elif node.label() == 'CREATE_EXPRESSION':
@@ -624,7 +625,8 @@ class Parser:
         except Exception:
             return False
 
-    def _is_final_name(self, node, i):
+    @staticmethod
+    def _is_final_name(node, i):
         """Comprueba si el nodo en cuestion, hace referencia a un nombre final de columna en la tabla que se esta
         creando. Esto es interesante porque puede afectar a futuras queries que dependan de esta tabla.
         Se trata de detectar si la referencia esta dentro de una funcion/casewhen, en cuyo caso es irrelevante, o si es
@@ -646,7 +648,7 @@ class Parser:
             # Es una subquery
             return False
 
-        if self._is_column_without_alias(node[0]):
+        if node.label() == 'COLUMN_EXPRESSION':
             # Se trata de una referencia directa a una columna
             return True
         else:
@@ -1136,7 +1138,7 @@ class Parser:
             self._logger.debug("Registro nuevo mapeo: '{}' por '{}'".format(old_name, new_name))
             self.__mapping[self._creating_table]['fields'].setdefault(old_name, new_name)
 
-    def _process_names(self, node, child, i, register):
+    def _process_names(self, node, child, i, register, rename_alias=None):
         """Procesa un nodo del AST. En caso de que este contenga un nombre de tabla o columna, lo renombra, en otro
         caso, continua recorriendo en profundidad el nodo.
 
@@ -1154,12 +1156,18 @@ class Parser:
             _old_name = node[3][0]
             node[1][0], node[3][0] = self.__change_column_name(node[1][0], _old_name, i)
             self._register_column(i, _old_name, node[3][0], register, node[1][0])
+            if rename_alias:
+                # Va con el nombre nuevo de tabla porque solo aplica si es columna final y ya no hay que buscar
+                _, rename_alias[-1][0] = self.__change_column_name(self._creating_table, rename_alias[-1][0], i)
         elif self._is_unreferenced_column_node(node, child):
             # Columna sin referencia a su tabla
-            _, _new_column = self._rename_orphan_column(node, i)
+            table, _new_column = self._rename_orphan_column(node, i)
             _new_column = _new_column if _new_column else node[1][0]
             self._register_column(i, node[1][0], _new_column, register)
             node[1][0] = _new_column
+            if rename_alias:
+                rename_alias[-1][0] = self.__mapping[self._creating_table]['fields'].get(rename_alias[-1][0],
+                                                                                         rename_alias[-1][0])
         elif self._is_table(node, child):
             # Tabla
             try:
@@ -1169,10 +1177,14 @@ class Parser:
                                      ' referencia a esta tabla sera renombrada'.format(child[0]))
                 self.__mapping.setdefault(child[0], self.new_mapped_table(child[0]))
 
+        elif node.label() == 'COLUMN_EXPRESSION' and len(child) and child[0] != 'AS' and len(node[-1]) \
+                and register and self._creating_table:
+            self._logger.debug('Mando alias a renombrar: {}'.format(node[-1]))
+            self._rename_children(child, i, register, node[-1])
         else:
             self._rename_children(child, i, register)
 
-    def _rename_children(self, node, i, register_column):
+    def _rename_children(self, node, i, register_column, alias=None):
         """Renombra las tablas y las columnas de acuerdo a los ficheros de mapping. Los cambios tienen lugar en el
         propio arbol recibido por parametro, ya que es un objeto mutable.
 
@@ -1183,7 +1195,7 @@ class Parser:
         i: int
             Indice de la query que se esta procesando.
         """
-        [self._process_names(node, child, i, register_column) for child in self.get_subtrees(node)]
+        [self._process_names(node, child, i, register_column, alias) for child in self.get_subtrees(node)]
 
     def rename_tree(self):
         """Procesa el AST y lleva a cabo el renombramiento conforme a los ficheros de mapping."""
