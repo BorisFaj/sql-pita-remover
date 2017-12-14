@@ -25,8 +25,8 @@ class Parser:
     def __init__(self, conf, udfs=None, logger=None, log_level=logging.INFO):
         logging.basicConfig(level=log_level, format='%(levelname)s %(name)s %(asctime)s %(message)s')
         self.tree = None
-        self.udfs = [udfs] if not isinstance(udfs, list) and udfs is not None else udfs
-        self._udfs_norm = [udf.replace('.', '_').upper() for udf in self.udfs]
+        self.udfs = [udfs] if not isinstance(udfs, list) else udfs
+        self._udfs_norm = [udf.replace('.', '_').upper() for udf in self.udfs if udf]
         self._logger = logging.getLogger('hive_parser') if not logger else logger
         self._config = self.load_json(conf)
         self._terminals = None
@@ -456,6 +456,7 @@ class Parser:
             _table_name = _alias_node[0] if len(_alias_node) == 1 else _alias_node[1]  # Si no lleva 'AS' guarda el primero
             tables['alias'].setdefault(_table_name, {'subquery': 0})
             # Se mete a la cola de subqueries
+            self._logger.debug('se mete a subquery: {}'.format(_table_name))
             self.__queries_elements.append(tables['alias'][_table_name])
         elif parent.label() != 'TABLE_ALIAS':
             # Si es una referencia directa a una tabla
@@ -611,7 +612,19 @@ class Parser:
                 'fields': {}}
 
     @staticmethod
-    def _is_final_name(node, i):
+    def _is_column_without_alias(node):
+        try:
+            if isinstance(node[0][0], str) and node[0][1].label() == 'SELECT_COMPLEMENT':
+                # Column reference sin parentesis
+                return True
+
+            elif node[0][0].label() == 'SELECT_COMPLEMENT':
+                # Column reference con parentesis
+                return True
+        except Exception:
+            return False
+
+    def _is_final_name(self, node, i):
         """Comprueba si el nodo en cuestion, hace referencia a un nombre final de columna en la tabla que se esta
         creando. Esto es interesante porque puede afectar a futuras queries que dependan de esta tabla.
         Se trata de detectar si la referencia esta dentro de una funcion/casewhen, en cuyo caso es irrelevante, o si es
@@ -633,7 +646,7 @@ class Parser:
             # Es una subquery
             return False
 
-        if node[0][0].label() == 'SELECT_COMPLEMENT':
+        if self._is_column_without_alias(node[0]):
             # Se trata de una referencia directa a una columna
             return True
         else:
@@ -669,7 +682,7 @@ class Parser:
             self.__iter_column_node(node, self.__queries[i]['columns'])
         elif parent.label() == 'FROM_EXPRESSION' and node.label() != 'TABLE_EXPRESSION':
             # Si es un nodo from, se mete a la lista de procesados y se explora el trozo de query
-            self.__reverse_tree.append((node, i, False))
+            self.__reverse_tree.append((node, i, True))
             self.__iter_column_node(node, self.__queries[i]['columns'])
         elif parent.label() == 'TABLE_EXPRESSION' and node.label() != 'TABLE_EXPRESSION':
             # Si es un nodo tabla, se explora el trozo de query y se obtiene el nodo de la primera subquery que
@@ -962,8 +975,12 @@ class Parser:
             _, new_column = self.__find_sub_column(table_name, column_name, i)
         else:
             # Si es una referencia normal
-            new_table = self.__mapping[table_name].get('new_name', table_name)
-            new_column = self.__mapping[table_name]['fields'].get(column_name, column_name)
+            try:
+                new_table = self.__mapping[table_name].get('new_name', table_name)
+                new_column = self.__mapping[table_name]['fields'].get(column_name, column_name)
+            except KeyError as err:
+                self._logger.debug('referencia normal. Tabla: {}, i: {}, is: {}'.format(table_name, i, self.is_subquery(table_name, i)))
+                raise KeyError(err)
 
         return new_table, new_column
 
@@ -1132,7 +1149,6 @@ class Parser:
         i: int
             Indice de la query que se esta procesando.
         """
-        # ToDo: en register_column hay que ser capaz de almacenar el alias, si tiene
         if self._is_referenced_column_node(node, child):
             # Columna con referencia a su tabla. El hijo de indice 1 es la tabla y el 3 la columna
             _old_name = node[3][0]
@@ -1141,7 +1157,6 @@ class Parser:
         elif self._is_unreferenced_column_node(node, child):
             # Columna sin referencia a su tabla
             _, _new_column = self._rename_orphan_column(node, i)
-            self._logger.debug('New column: {}. Nodo: {}'.format(_new_column, node))
             _new_column = _new_column if _new_column else node[1][0]
             self._register_column(i, node[1][0], _new_column, register)
             node[1][0] = _new_column
