@@ -1,24 +1,42 @@
+CREATE TABLE t20 AS
 SELECT 
-    alias_t1.a,
-    COUNT(DISTINCT alias_t1.a) OVER (PARTITION BY alias_t1.c),
+    alias_t1.a a,
+    COUNT(DISTINCT alias_t1.a) OVER (PARTITION BY alias_t1.c) dist_a,
     alias_t1.b AS total,
-    alias_t1.a
+    alias_t1.b AS b
 FROM t1 alias_t1
 WHERE total > 1000
 
 UNION ALL
 
 SELECT 
-    a,
+    a a2,
     b
-FROM t1
+FROM t2
 
 UNION ALL
 
-SELECT a,b,c FROM t2
+SELECT a3, b3, c3 FROM t3
 ;
 
+CREATE TABLE t21 AS
+SELECT
+    a as dist_a,
+    p,
+    cast(c as string),
+    WHERE_COLUMN as total
+FROM t2
 
+;
+
+SELECT p, dist_a, total, c FROM 
+( SELECT * FROM (SELECT * FROM t20) sub2
+                 JOIN (SELECT * FROM t21) alias_join
+           ON alias_join.p = sub2.a2
+           WHERE alias_join.p > sub2.total
+ ) sub
+
+;
 -- esta query es de prueba 
 INSERT OVERWRITE TABLE t1 PARTITION(a = '12/02/2019', b)
 SELECT
