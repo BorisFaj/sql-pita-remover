@@ -22,11 +22,14 @@ class OutOfGrammarException(Exception):
 
 
 class Parser:
-    def __init__(self, conf, udfs=None, logger=None, log_level=logging.INFO):
+    def __init__(self, conf, udfs=None, hive_var={}, logger=None, log_level=logging.INFO):
         logging.basicConfig(level=log_level, format='%(levelname)s %(name)s %(asctime)s %(message)s')
         self.tree = None
         self.udfs = [udfs] if not isinstance(udfs, list) else udfs
         self._udfs_norm = [udf.replace('.', '_').upper() for udf in self.udfs if udf]
+        if hive_var and not isinstance(hive_var, dict):
+            raise TypeError('La variable hive_var tiene que ser un diccionario')
+        self.hive_var = hive_var
         self._logger = logging.getLogger('hive_parser') if not logger else logger
         self._config = self.load_json(conf)
         self._terminals = None
@@ -1258,6 +1261,10 @@ class Parser:
             for point, scape in zip(self.udfs, self._udfs_norm):
                 pattern = re.compile(point, re.IGNORECASE)
                 line = pattern.sub(scape, line)
+
+        if self.hive_var:
+            for var in self.hive_var.keys():
+                line = line.replace(var, self.hive_var[var])
 
         line = (line
                 .replace(',', ' , ')
