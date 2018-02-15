@@ -3,7 +3,7 @@ import nltk
 import copy
 import re
 from unittest import TestCase
-from hive_parser.parser import Parser, UnreferencedTableError
+from rosqltta.parser import Parser, UnreferencedTableError
 
 
 class TestParser(TestCase):
