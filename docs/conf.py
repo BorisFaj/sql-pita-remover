@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 #
-# hive_parser documentation build configuration file, created by
+# rosqltta documentation build configuration file, created by
 # sphinx-quickstart on Thu Nov 16 12:40:50 2017.
 #
 # This file is execfile()d with the current directory set to its
@@ -37,7 +37,7 @@ extensions = ['sphinx.ext.autodoc', 'sphinx.ext.napoleon', 'autoapi.extension']
 
 # autoapi settings
 autoapi_type = 'python'
-autoapi_dirs = ['../hive_parser']
+autoapi_dirs = ['../rosqltta']
 
 # Napoleon settings
 napoleon_numpy_docstring = True
@@ -64,7 +64,7 @@ source_suffix = '.rst'
 master_doc = 'index'
 
 # General information about the project.
-project = 'hive_parser'
+project = 'rosqltta'
 copyright = '2017, Boris Fajardo'
 author = 'Boris Fajardo'
 
@@ -160,7 +160,7 @@ latex_elements = {
 # (source start file, target name, title,
 #  author, documentclass [howto, manual, or own class]).
 latex_documents = [
-    (master_doc, 'hive_parser.tex', 'hive\\_parser Documentation',
+    (master_doc, 'rosqltta.tex', 'hive\\_parser Documentation',
      'Boris Fajardo', 'manual'),
 ]
 
@@ -170,7 +170,7 @@ latex_documents = [
 # One entry per manual page. List of tuples
 # (source start file, name, description, authors, manual section).
 man_pages = [
-    (master_doc, 'hive_parser', 'hive_parser Documentation',
+    (master_doc, 'rosqltta', 'rosqltta Documentation',
      [author], 1)
 ]
 
@@ -181,8 +181,8 @@ man_pages = [
 # (source start file, target name, title, author,
 #  dir menu entry, description, category)
 texinfo_documents = [
-    (master_doc, 'hive_parser', 'hive_parser Documentation',
-     author, 'hive_parser', 'One line description of project.',
+    (master_doc, 'rosqltta', 'rosqltta Documentation',
+     author, 'rosqltta', 'One line description of project.',
      'Miscellaneous'),
 ]
 

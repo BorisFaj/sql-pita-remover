@@ -30,7 +30,7 @@ class Parser:
         if hive_var and not isinstance(hive_var, dict):
             raise TypeError('La variable hive_var tiene que ser un diccionario')
         self.hive_var = hive_var
-        self._logger = logging.getLogger('hive_parser') if not logger else logger
+        self._logger = logging.getLogger('rosqltta') if not logger else logger
         self._config = self.load_json(conf)
         self._terminals = None
         self._creating_table = None
